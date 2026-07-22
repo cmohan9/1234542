@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    CyberArk Privilege Cloud — Unified Power BI Dashboard Data Exporter (V4)
+    CyberArk Privilege Cloud — Unified Power BI Dashboard Data Exporter (V5)
 .DESCRIPTION
     Single-run, READ-ONLY script that authenticates to CyberArk ISPSS (Privilege
     Cloud SaaS), collects operational metrics, infrastructure health, and security
@@ -21,18 +21,26 @@
     READ-ONLY (GET requests only — no changes are made to CyberArk)
 .NOTES
     Author   : Mohan C
-    Version  : 4.0
+    Version  : 5.0
     Requires : PowerShell 5.1+, CyberArk Privilege Cloud API access
                Service user needs: Privilege Cloud Administrator or Auditor role
                Optional: Connector Management Admin role (for connector APIs)
 
-    Changes since V3:
-      - Empty tables now export a real header row (matching Export-Csv output)
-        instead of a blank file, so Power BI keeps a stable schema on refresh.
-      - Get-Region requires a delimiter/end-of-string after a region prefix,
-        preventing mis-tags (e.g. OTHER-*, JPMORGAN-*, EMEAX-*).
-      - Safe Members call uses includePredefinedUsers=true as its own query
-        parameter instead of an invalid filter clause.
+    Changes since V4:
+      - New SafeType classification (Section E) on DIM_Safe and FACT_Accounts:
+          * "Personal Admin"    — safe name ends with -ADM (user-specific admin accts)
+          * "Shared Admin"      — safe name ends with -T0/-T1/-T2 (shared tier admin accts)
+          * "Standard Business" — any other non-default safe
+          * "System/Default"    — CyberArk internal/default safes
+      - Region is now optional: -ADM and -T0/-T1/-T2 safes are treated as
+        naming-compliant even without a region prefix.
+      - Tier for -ADM safes is extracted from the name when a T0/T1/T2 token is
+        present, otherwise tagged "Personal/All-Tiers".
+
+    Changes in V4 (carried forward):
+      - Empty tables export a real header row (stable Power BI schema).
+      - Get-Region requires a delimiter after a region prefix (no mis-tags).
+      - Safe Members call uses includePredefinedUsers=true query parameter.
 #>
 
 # ╔════════════════════════════════════════════════════════════════════════════╗
@@ -125,9 +133,20 @@ $RegionPrefixes = [ordered]@{
 # Tier tokens: captures T0/T1/T2 from the safe name. No match => "Untagged".
 $TierRegex = '(^|[-_ ])T([012])([-_ ]|$)'
 
+# ── SAFE TYPE CLASSIFICATION (admin vs business) ─────────────────────────────
+# Not every safe carries a region prefix. Admin safes are identified by suffix:
+#   *-ADM         => "Personal Admin"  (user-specific personal admin accounts; tier varies)
+#   *-T0/-T1/-T2  => "Shared Admin"    (shared admin accounts for that specific tier)
+# Anything else non-default => "Standard Business". Default/system safes => "System/Default".
+$PersonalAdminSuffixRegex = '-ADM$'          # matches safe names ending in -ADM (case-insensitive)
+$SharedAdminSuffixRegex   = '-T[012]$'        # matches safe names ending in -T0 / -T1 / -T2
+# Tier label used for Personal Admin safes when no T0/T1/T2 token is present in the name.
+$PersonalAdminTierLabel   = 'Personal/All-Tiers'
+
 # Safe name validation: business safe names SHOULD match this regex.
 # Set to empty string '' to disable this check.
 # This auto-builds from $RegionPrefixes keys; override with a custom pattern if needed.
+# NOTE: -ADM and -T0/-T1/-T2 admin safes are ALSO treated as naming-compliant (region optional).
 $SafeNameExpectedRegex = ''   # Leave empty = auto-build from RegionPrefixes; or set custom regex
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -387,6 +406,20 @@ function Get-Region { param([string]$s)
 function Get-Tier { param([string]$s)
     if ($s -match $TierRegex) { "T$($matches[2])" } else { "Untagged" }
 }
+# Classify a safe by its naming suffix. Default/system safes are tagged first.
+function Get-SafeType { param([string]$s, [bool]$IsDefault)
+    if ($IsDefault) { return "System/Default" }
+    if ($s -match $PersonalAdminSuffixRegex) { return "Personal Admin" }
+    if ($s -match $SharedAdminSuffixRegex)   { return "Shared Admin" }
+    return "Standard Business"
+}
+# Tier for a safe, aware of SafeType. Personal Admin safes with no T0/T1/T2 token
+# in the name fall back to the "Personal/All-Tiers" label instead of "Untagged".
+function Get-SafeTier { param([string]$s, [string]$SafeType)
+    $t = Get-Tier $s
+    if ($t -eq "Untagged" -and $SafeType -eq "Personal Admin") { return $PersonalAdminTierLabel }
+    return $t
+}
 function Get-OSCategory { param([string]$p)
     foreach ($x in $WindowsPlatformPatterns)  { if ($p -like $x) { return "Windows" } }
     foreach ($x in $UnixPlatformPatterns)     { if ($p -like $x) { return "Unix/Linux" } }
@@ -401,7 +434,13 @@ function Get-RotationDays { param([string]$p)
 }
 function Test-SafeNaming { param([string]$s)
     if ([string]::IsNullOrWhiteSpace($SafeNameExpectedRegex)) { return $true }
-    return ($s -match $SafeNameExpectedRegex)
+    # A safe is naming-compliant if it EITHER starts with a known region prefix,
+    # OR is an admin safe identified by suffix (-ADM / -T0 / -T1 / -T2). Region is
+    # optional for admin safes, so they must not be flagged as non-standard.
+    if ($s -match $SafeNameExpectedRegex)     { return $true }
+    if ($s -match $PersonalAdminSuffixRegex)  { return $true }
+    if ($s -match $SharedAdminSuffixRegex)    { return $true }
+    return $false
 }
 function Test-AccountNaming { param([string]$n)
     if ([string]::IsNullOrWhiteSpace($AccountNameExpectedRegex)) { return $true }
@@ -441,7 +480,7 @@ function Add-Metric { param($M,$D,$V)
 }
 
 Write-Log "═══════════════════════════════════════════════════════════" SECTION
-Write-Log " CyberArk Privilege Cloud — Unified Dashboard Exporter V3" SECTION
+Write-Log " CyberArk Privilege Cloud — Unified Dashboard Exporter V5" SECTION
 Write-Log "═══════════════════════════════════════════════════════════" SECTION
 Write-Log "PowerShell   : $($PSVersionTable.PSVersion)" INFO
 Write-Log "Extract Date : $ExtractDate" INFO
@@ -464,6 +503,7 @@ $DimSafe = @(foreach ($s in $SafesRaw) {
     $created = ConvertFrom-Unix $s.creationTime
     $lastMod = ConvertFrom-UnixMicro $s.lastModificationTime
     $namingOk = if ($def) { $true } else { Test-SafeNaming $s.safeName }
+    $safeType = Get-SafeType $s.safeName $def
     [pscustomobject]@{
         SafeName      = $s.safeName
         SafeUrlId     = $s.safeUrlId
@@ -481,8 +521,9 @@ $DimSafe = @(foreach ($s in $SafesRaw) {
         CreatedDateTime = Format-DateTime $created
         LastModifiedDateTime = Format-DateTime $lastMod
         IsDefault     = $def
+        SafeType      = $safeType
         Region        = if ($def) { "N/A-Default" } else { Get-Region $s.safeName }
-        Tier          = if ($def) { "N/A-Default" } else { Get-Tier $s.safeName }
+        Tier          = if ($def) { "N/A-Default" } else { Get-SafeTier $s.safeName $safeType }
         HasCPM        = -not [string]::IsNullOrWhiteSpace($s.managingCPM)
         IsEmpty       = ([int]$s.numberOfAccounts -eq 0)
         RecentlyCreated = ($created -and (New-TimeSpan -Start $created -End (Get-Date)).Days -le $OnboardingWindowDays)
@@ -605,8 +646,9 @@ $FactAccounts = @(foreach ($a in $AcctRaw) {
     $rot      = Get-RotationDays $a.platformId
     $cpmStat  = Safe-String $sm.status
     $comp     = switch ($cpmStat) { "success" { "Compliant" } "failure" { "Non-Compliant" } default { "Pending/Unknown" } }
+    $safeType = if ($sfi) { $sfi.SafeType } else { Get-SafeType $a.safeName $defSafe }
     $region   = if ($sfi) { $sfi.Region } else { Get-Region $a.safeName }
-    $tier     = if ($sfi) { $sfi.Tier }   else { Get-Tier $a.safeName }
+    $tier     = if ($sfi) { $sfi.Tier }   else { Get-SafeTier $a.safeName $safeType }
     $platId   = Safe-String $a.platformId "Unknown"
     $nameOk   = Test-AccountNaming (Safe-String $a.name)
     $addrOk   = Test-AccountAddress (Safe-String $a.address)
@@ -651,6 +693,7 @@ $FactAccounts = @(foreach ($a in $AcctRaw) {
         PlatformID        = $platId
         SecretType        = Safe-String $a.secretType
         IsDefaultSafe     = $defSafe
+        SafeType          = $safeType
         Region            = $region
         Tier              = $tier
         OSCategory        = Get-OSCategory $platId
@@ -1193,8 +1236,10 @@ $RecordCounts["FACT_AdminAudit"] = $AdminAuditRows.Count
 Write-Log "=== Step 15: Building Metrics Summary ===" SECTION
 
 # Inventory
-foreach ($g in $bizSafes | Group-Object Region) { Add-Metric "Safes by Region" $g.Name $g.Count }
-foreach ($g in $bizSafes | Group-Object Tier)   { Add-Metric "Safes by Tier" $g.Name $g.Count }
+foreach ($g in $bizSafes | Group-Object Region)   { Add-Metric "Safes by Region" $g.Name $g.Count }
+foreach ($g in $bizSafes | Group-Object Tier)     { Add-Metric "Safes by Tier" $g.Name $g.Count }
+foreach ($g in $bizSafes | Group-Object SafeType) { Add-Metric "Safes by SafeType" $g.Name $g.Count }
+foreach ($g in $biz | Group-Object SafeType)      { Add-Metric "Accounts by SafeType" $g.Name $g.Count }
 Add-Metric "Platforms Total" "All" $DimPlatform.Count
 Add-Metric "Platforms Active" "Active" (@($DimPlatform | Where-Object { $_.Active }).Count)
 Add-Metric "Platforms Defined-but-Unused" "All" (@($FactPlatformSummary | Where-Object { -not $_.IsUsed }).Count)
@@ -1346,11 +1391,11 @@ $CsvExports = @(
     @{ Name="DIM_Platform";          Data=$DimPlatform;          File="$LatestDir\DIM_Platform.csv";
        Cols=@("PlatformID","PlatformName","SystemType","Active","PlatformBaseID","PlatformType","OSCategory","RotationDays","ExtractDate") },
     @{ Name="DIM_Safe";              Data=$DimSafe;              File="$LatestDir\DIM_Safe.csv";
-       Cols=@("SafeName","SafeUrlId","SafeNumber","Description","Location","Creator","ManagingCPM","NumberOfAccounts","OLACEnabled","AutoPurge","RetentionVersions","RetentionDays","CreatedDate","CreatedDateTime","LastModifiedDateTime","IsDefault","Region","Tier","HasCPM","IsEmpty","RecentlyCreated","NamingCompliant","ExtractDate") },
+       Cols=@("SafeName","SafeUrlId","SafeNumber","Description","Location","Creator","ManagingCPM","NumberOfAccounts","OLACEnabled","AutoPurge","RetentionVersions","RetentionDays","CreatedDate","CreatedDateTime","LastModifiedDateTime","IsDefault","SafeType","Region","Tier","HasCPM","IsEmpty","RecentlyCreated","NamingCompliant","ExtractDate") },
     @{ Name="DIM_Connector";         Data=$ConnectorRows;        File="$LatestDir\DIM_Connector.csv";
        Cols=@("ConnectorID","Hostname","IPAddress","OS","Status","AgentVersion","PlatformType","InstalledAt","UpdatedAt","ExtractDate") },
     @{ Name="FACT_Accounts";         Data=$FactAccounts;         File="$LatestDir\FACT_Accounts.csv";
-       Cols=@("AccountID","Name","UserName","Address","SafeName","PlatformID","SecretType","IsDefaultSafe","Region","Tier","OSCategory","AutoManaged","MgmtTechnique","ManualReason","ComplianceStatus","SecretStatus","LastChangeDate","LastChangeDateTime","DaysSinceChange","ExpectedRotationDays","RotationOverdue","LastVerifyDate","DaysSinceVerify","VerifyStatus","LastReconciledDate","IsStale","CreatedDate","CreatedMonth","AccountAgeDays","RecentlyOnboarded","NameCompliant","AddressCompliant","HasAddress","ExtractDate") },
+       Cols=@("AccountID","Name","UserName","Address","SafeName","PlatformID","SecretType","IsDefaultSafe","SafeType","Region","Tier","OSCategory","AutoManaged","MgmtTechnique","ManualReason","ComplianceStatus","SecretStatus","LastChangeDate","LastChangeDateTime","DaysSinceChange","ExpectedRotationDays","RotationOverdue","LastVerifyDate","DaysSinceVerify","VerifyStatus","LastReconciledDate","IsStale","CreatedDate","CreatedMonth","AccountAgeDays","RecentlyOnboarded","NameCompliant","AddressCompliant","HasAddress","ExtractDate") },
     @{ Name="FACT_Users";            Data=$FactUsers;            File="$LatestDir\FACT_Users.csv";
        Cols=@("UserName","UserID","Source","UserType","ComponentUser","IsComponent","Enabled","Suspended","Location","FirstName","LastName","Email","VaultAuth","PasswordNeverExpires","LastLoginDate","LastLoginDateTime","DaysSinceLogin","LoginStatus","ExtractDate") },
     @{ Name="FACT_Groups";           Data=$FactGroups;           File="$LatestDir\FACT_Groups.csv";
