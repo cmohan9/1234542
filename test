@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    CyberArk Privilege Cloud — Unified Power BI Dashboard Data Exporter (V5)
+    CyberArk Privilege Cloud — Unified Power BI Dashboard Data Exporter (V6)
 .DESCRIPTION
     Single-run, READ-ONLY script that authenticates to CyberArk ISPSS (Privilege
     Cloud SaaS), collects operational metrics, infrastructure health, and security
@@ -21,12 +21,22 @@
     READ-ONLY (GET requests only — no changes are made to CyberArk)
 .NOTES
     Author   : Mohan C
-    Version  : 5.0
+    Version  : 6.0
     Requires : PowerShell 5.1+, CyberArk Privilege Cloud API access
                Service user needs: Privilege Cloud Administrator or Auditor role
-               Optional: Connector Management Admin role (for connector APIs)
 
-    Changes since V4:
+    Changes since V5 (sections removed per request):
+      - REMOVED System Health summary  (FACT_SystemHealth).
+      - REMOVED Portal URL health       (FACT_PortalHealth).
+      - REMOVED Active PSM sessions      (FACT_ActiveSessions).
+      - REMOVED Connector stage entirely (DIM_Connector + FACT_ComponentHealth)
+        — ComponentType came back empty in this environment.
+      - REMOVED security risk findings   (FACT_RiskFindings and all risk-type
+        detection). FACT_SafeMembers and FACT_AdminAudit are RETAINED.
+      Output is now 14 CSVs (was 20). Vault Connectivity (CPM/PSM/AIM logon
+      status) is KEPT.
+
+    Changes in V5 (carried forward):
       - New SafeType classification (Section E) on DIM_Safe and FACT_Accounts:
           * "Personal Admin"    — safe name ends with -ADM (user-specific admin accts)
           * "Shared Admin"      — safe name ends with -T0/-T1/-T2 (shared tier admin accts)
@@ -480,7 +490,7 @@ function Add-Metric { param($M,$D,$V)
 }
 
 Write-Log "═══════════════════════════════════════════════════════════" SECTION
-Write-Log " CyberArk Privilege Cloud — Unified Dashboard Exporter V5" SECTION
+Write-Log " CyberArk Privilege Cloud — Unified Dashboard Exporter V6" SECTION
 Write-Log "═══════════════════════════════════════════════════════════" SECTION
 Write-Log "PowerShell   : $($PSVersionTable.PSVersion)" INFO
 Write-Log "Extract Date : $ExtractDate" INFO
@@ -752,39 +762,9 @@ $FactPlatformSummary = @(foreach ($pk in ($PlatformStats.Keys | Sort-Object)) {
 $RecordCounts["FACT_PlatformSummary"] = $FactPlatformSummary.Count
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  STEP 7 : SYSTEM HEALTH SUMMARY → FACT_SystemHealth.csv
+#  STEP 7 : VAULT CONNECTIVITY → FACT_VaultConnectivity.csv
 # ══════════════════════════════════════════════════════════════════════════════
-Write-Log "=== Step 7: Fetching System Health Summary ===" SECTION
-$HealthRows = [System.Collections.Generic.List[PSCustomObject]]::new()
-try {
-    $hResp = Invoke-ApiGet -Uri "$PvwaBase/ComponentsMonitoringSummary/"
-    if ($null -ne $hResp -and $null -ne $hResp.Components) {
-        foreach ($c in $hResp.Components) {
-            $HealthRows.Add([pscustomobject]@{
-                ComponentID    = Safe-String $c.ComponentID
-                ComponentName  = Safe-String $c.ComponentName
-                Description    = Safe-String $c.Description
-                ConnectedCount = $c.ConnectedComponentCount
-                TotalCount     = $c.ComponentTotalCount
-                SpecificStat   = $c.ComponentSpecificStat
-                ExtractDate    = $ExtractDate
-            })
-        }
-        Write-Log "System health components: $($HealthRows.Count)" SUCCESS
-    } else {
-        Write-Log "No system health summary data returned." WARN
-        $RunErrors.Add("SystemHealth: No data returned")
-    }
-} catch {
-    Write-Log "Failed to fetch system health: $($_.Exception.Message)" ERROR
-    $RunErrors.Add("SystemHealth: $($_.Exception.Message)")
-}
-$RecordCounts["FACT_SystemHealth"] = $HealthRows.Count
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  STEP 8 : VAULT CONNECTIVITY → FACT_VaultConnectivity.csv
-# ══════════════════════════════════════════════════════════════════════════════
-Write-Log "=== Step 8: Fetching Vault Connectivity ===" SECTION
+Write-Log "=== Step 7: Fetching Vault Connectivity ===" SECTION
 $VaultRows = [System.Collections.Generic.List[PSCustomObject]]::new()
 foreach ($compType in $VaultComponentIDs) {
     try {
@@ -811,185 +791,16 @@ foreach ($compType in $VaultComponentIDs) {
 Write-Log "Vault connectivity records: $($VaultRows.Count)" SUCCESS
 $RecordCounts["FACT_VaultConnectivity"] = $VaultRows.Count
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  STEP 9 : CONNECTOR SERVERS & COMPONENTS → DIM_Connector.csv + FACT_ComponentHealth.csv
-# ══════════════════════════════════════════════════════════════════════════════
-Write-Log "=== Step 9: Fetching Connector Servers & Components ===" SECTION
-$ConnectorRows  = [System.Collections.Generic.List[PSCustomObject]]::new()
-$ComponentRows  = [System.Collections.Generic.List[PSCustomObject]]::new()
-$ConnectorMap   = [ordered]@{}
-
-try {
-    $cHeaders = Get-Headers
-    $connResp = Invoke-ApiGetExplicit -Uri "$ConnMgmtBase/connectors" -Headers $cHeaders
-    if ($null -ne $connResp) {
-        $connectors = $null
-        if ($connResp.connectors)     { $connectors = $connResp.connectors }
-        elseif ($connResp.value)      { $connectors = $connResp.value }
-        elseif ($connResp -is [array]) { $connectors = $connResp }
-
-        if ($null -ne $connectors -and $connectors.Count -gt 0) {
-            foreach ($c in $connectors) {
-                $hostname = Safe-String $c.host.hostname
-                $ConnectorMap[$c.connectorId] = $hostname
-                $ConnectorRows.Add([pscustomobject]@{
-                    ConnectorID  = $c.connectorId
-                    Hostname     = $hostname
-                    IPAddress    = Safe-String $c.host.privateIp
-                    OS           = Safe-String $c.host.os
-                    Status       = Safe-String $c.connectorStatus
-                    AgentVersion = Safe-String $c.version
-                    PlatformType = Safe-String $c.platformType
-                    InstalledAt  = Format-DateTime (ConvertFrom-UnixMs $c.installedAt)
-                    UpdatedAt    = Format-DateTime (ConvertFrom-UnixMs $c.updatedAt)
-                    ExtractDate  = $ExtractDate
-                })
-            }
-            Write-Log "Connector servers: $($ConnectorRows.Count)" SUCCESS
-
-            # Fetch components for each connector
-            foreach ($connId in $ConnectorMap.Keys) {
-                $hostname = $ConnectorMap[$connId]
-                try {
-                    $compResp = Invoke-ApiGetExplicit -Uri "$ConnMgmtBase/connectors/$connId/components" -Headers $cHeaders
-                    if ($null -ne $compResp) {
-                        $components = $null
-                        if ($compResp.components)     { $components = $compResp.components }
-                        elseif ($compResp.value)      { $components = $compResp.value }
-                        elseif ($compResp -is [array]) { $components = $compResp }
-                        if ($null -ne $components) {
-                            foreach ($comp in $components) {
-                                $ComponentRows.Add([pscustomobject]@{
-                                    ConnectorID   = $connId
-                                    Hostname      = $hostname
-                                    ComponentID   = Safe-String $comp.componentId
-                                    ComponentType = Safe-String $comp.componentType
-                                    Status        = Safe-String $comp.status
-                                    Version       = Safe-String $comp.version
-                                    InstalledAt   = Format-DateTime (ConvertFrom-UnixMs $comp.installedAt)
-                                    UpdatedAt     = Format-DateTime (ConvertFrom-UnixMs $comp.updatedAt)
-                                    ExtractDate   = $ExtractDate
-                                })
-                            }
-                        }
-                    }
-                } catch {
-                    Write-Log "Failed components for ${hostname}: $($_.Exception.Message)" ERROR
-                    $RunErrors.Add("ConnectorComponents ($hostname): $($_.Exception.Message)")
-                }
-            }
-            Write-Log "Connector components: $($ComponentRows.Count)" SUCCESS
-        } else {
-            Write-Log "Connector API returned empty data." WARN
-        }
-    } else {
-        Write-Log "No connector data. Ensure service user has 'Connector Management Admin' role." WARN
-        $RunErrors.Add("Connectors: Null response (check permissions)")
-    }
-} catch {
-    Write-Log "Failed connector servers: $($_.Exception.Message)" ERROR
-    $RunErrors.Add("Connectors: $($_.Exception.Message)")
-}
-$RecordCounts["DIM_Connector"] = $ConnectorRows.Count
-$RecordCounts["FACT_ComponentHealth"] = $ComponentRows.Count
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  STEP 10 : PORTAL URL HEALTH → FACT_PortalHealth.csv
-# ══════════════════════════════════════════════════════════════════════════════
-Write-Log "=== Step 10: Checking Portal URL Health ===" SECTION
-$PortalRows = [System.Collections.Generic.List[PSCustomObject]]::new()
-
-$UrlChecks = @(
-    @{ Name="Privilege Cloud Portal"; Url="https://$Subdomain.privilegecloud.cyberark.cloud/PasswordVault/api/server"; Auth=$true },
-    @{ Name="Identity Platform";     Url="$IdentityUrl/.well-known/openid-configuration"; Auth=$false },
-    @{ Name="Connector Management";  Url="$ConnMgmtBase/connectors"; Auth=$true }
-)
-
-foreach ($check in $UrlChecks) {
-    $hdrs = if ($check.Auth) { @{ Authorization = "Bearer $Global:Token" } } else { @{} }
-    $httpStatus = 0; $respStatus = "DOWN"; $latencyMs = 0
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    try {
-        $resp = Invoke-WebRequest -Uri $check.Url -Method GET -Headers $hdrs -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
-        $sw.Stop(); $httpStatus = $resp.StatusCode; $latencyMs = $sw.ElapsedMilliseconds
-        $respStatus = if ($httpStatus -eq 200) { "UP" } else { "DEGRADED" }
-    } catch {
-        $sw.Stop(); $latencyMs = $sw.ElapsedMilliseconds
-        if ($_.Exception.Response) {
-            $httpStatus = [int]$_.Exception.Response.StatusCode
-            $respStatus = if ($httpStatus -in @(401,403)) { "UP (Auth Required)" } else { "ERROR ($httpStatus)" }
-        } else { $httpStatus = 0; $respStatus = "DOWN" }
-    }
-    $PortalRows.Add([pscustomobject]@{
-        EndpointName   = $check.Name
-        URL            = $check.Url
-        HTTPStatus     = $httpStatus
-        ResponseStatus = $respStatus
-        LatencyMs      = $latencyMs
-        ExtractDate    = $ExtractDate
-    })
-    Write-Log "  $($check.Name): HTTP $httpStatus | ${latencyMs}ms | $respStatus" $(if ($respStatus -eq "DOWN") { "ERROR" } else { "SUCCESS" })
-}
-$RecordCounts["FACT_PortalHealth"] = $PortalRows.Count
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  STEP 11 : ACTIVE PSM SESSIONS → FACT_ActiveSessions.csv
-# ══════════════════════════════════════════════════════════════════════════════
-Write-Log "=== Step 11: Fetching Active PSM Sessions ===" SECTION
-$SessionRows = [System.Collections.Generic.List[PSCustomObject]]::new()
-try {
-    $sessResp = Invoke-ApiGet -Uri "$PvwaBase/LiveSessions?limit=1000"
-    if ($null -ne $sessResp) {
-        $sessions = $null
-        if ($sessResp.LiveSessions)   { $sessions = $sessResp.LiveSessions }
-        elseif ($sessResp.value)      { $sessions = $sessResp.value }
-        elseif ($sessResp -is [array]) { $sessions = $sessResp }
-        if ($null -ne $sessions -and $sessions.Count -gt 0) {
-            foreach ($s in $sessions) {
-                $startTime = ""
-                if ($s.Start) {
-                    if ($s.Start -is [long] -or $s.Start -match '^\d+$') { $startTime = Format-DateTime (ConvertFrom-Unix $s.Start) }
-                    else { $startTime = "$($s.Start)" }
-                }
-                $SessionRows.Add([pscustomobject]@{
-                    SessionID           = Safe-String $s.SessionID
-                    User                = Safe-String $s.User
-                    FromIP              = Safe-String $s.FromIP
-                    AccountName         = Safe-String $s.AccountUsername
-                    RemoteMachine       = Safe-String $s.RemoteMachine
-                    Platform            = Safe-String $s.AccountPlatformID
-                    PSMServer           = Safe-String $s.PSMServerID
-                    ConnectionComponent = Safe-String $s.ConnectionComponentID
-                    Protocol            = Safe-String $s.Protocol
-                    Client              = Safe-String $s.Client
-                    StartTime           = $startTime
-                    Duration            = Safe-String $s.Duration "0"
-                    RiskScore           = Safe-String $s.RiskScore ""
-                    IsLive              = if ($s.IsLive -eq $true) { "TRUE" } else { "FALSE" }
-                    ExtractDate         = $ExtractDate
-                })
-            }
-            Write-Log "Active PSM sessions: $($SessionRows.Count)" SUCCESS
-        } else { Write-Log "No active PSM sessions at this time." INFO }
-    }
-} catch {
-    Write-Log "Failed to fetch sessions: $($_.Exception.Message)" ERROR
-    $RunErrors.Add("ActiveSessions: $($_.Exception.Message)")
-}
-$RecordCounts["FACT_ActiveSessions"] = $SessionRows.Count
-
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  STEP 13 : SAFE MEMBERS + SECURITY RISK AUDIT → FACT_SafeMembers.csv +
-#            FACT_RiskFindings.csv + FACT_AdminAudit.csv (opt-in)
+#  STEP 13 : SAFE MEMBERS + ADMIN/BREAKGLASS AUDIT → FACT_SafeMembers.csv +
+#            FACT_AdminAudit.csv (opt-in)
 # ══════════════════════════════════════════════════════════════════════════════
 $MemberRows  = [System.Collections.Generic.List[PSCustomObject]]::new()
-$RiskRows    = [System.Collections.Generic.List[PSCustomObject]]::new()
 $AdminAuditRows = [System.Collections.Generic.List[PSCustomObject]]::new()
 
 if ($CollectSafeMembers) {
-    Write-Log "=== Step 13: Collecting Safe Members + Security Risk Audit ===" SECTION
+    Write-Log "=== Step 13: Collecting Safe Members + Admin/Breakglass Audit ===" SECTION
     $memberSw = [System.Diagnostics.Stopwatch]::StartNew()
     $safeIdx  = 0
 
@@ -1009,7 +820,6 @@ if ($CollectSafeMembers) {
             $allMembers += $mBatch; $mOff += $PageLimit
         } while ($mBatch.Count -eq $PageLimit)
 
-        $hasSafeManager = $false
         $foundAuditGroups = @{}
         foreach ($ag in $AuditGroups) { $foundAuditGroups[$ag] = $null }
 
@@ -1019,103 +829,16 @@ if ($CollectSafeMembers) {
             $perms = $m.permissions
             $isDef = Test-IsDefaultMember $mName
 
-            # Safe Manager check
+            # Safe Manager check (retained for the IsSafeManager column on FACT_SafeMembers)
             $isMgr = $true
             foreach ($p in $SafeManagerCheckPermissions) {
                 if ($perms.$p -ne $true) { $isMgr = $false; break }
             }
-            if ($isMgr) { $hasSafeManager = $true }
 
             # Member category
             $cat = "Standard"
             if ($sf.IsDefault -or $isDef) { $cat = "DefaultSystem" }
             elseif ($AuditGroups -contains $mName) { $cat = "AuditedAdminBG" }
-
-            # ── Security Checks (only for business safes) ───────────
-            if (-not $sf.IsDefault) {
-                # Check A: Direct User Assignment
-                if ($mType -eq "User" -and -not $isDef) {
-                    $RiskRows.Add([pscustomobject]@{
-                        SafeName=$safeName; MemberName=$mName; MemberType=$mType; IsSafeManager=$isMgr
-                        MemberCategory=$cat; Region=$sf.Region; Tier=$sf.Tier
-                        RiskType="Direct User Permission"
-                        RiskDescription="Permissions mapped directly to a human user account instead of an AD/LDAP group."
-                        RemediationAction="Remove direct user assignment; map via an AD/LDAP Group."
-                        ExtractDate=$ExtractDate
-                    })
-                }
-                # Check B: Segregation of Duties
-                if ($perms.retrieveAccounts -eq $true -and ($perms.requestsAuthorizationLevel1 -eq $true -or $perms.requestsAuthorizationLevel2 -eq $true)) {
-                    $RiskRows.Add([pscustomobject]@{
-                        SafeName=$safeName; MemberName=$mName; MemberType=$mType; IsSafeManager=$isMgr
-                        MemberCategory=$cat; Region=$sf.Region; Tier=$sf.Tier
-                        RiskType="Segregation of Duties"
-                        RiskDescription="Identity can both retrieve credentials AND approve requests (Dual Control Bypass)."
-                        RemediationAction="Disable approval levels for members requiring credential retrieval."
-                        ExtractDate=$ExtractDate
-                    })
-                }
-                # Check C: Excessive Privileges for Standard members
-                if ($cat -eq "Standard") {
-                    $excPerms = @()
-                    foreach ($dp in $DangerousPermissions) {
-                        if ($perms.$dp -eq $true) { $excPerms += $dp }
-                    }
-                    if ($excPerms.Count -gt 0) {
-                        $RiskRows.Add([pscustomobject]@{
-                            SafeName=$safeName; MemberName=$mName; MemberType=$mType; IsSafeManager=$isMgr
-                            MemberCategory=$cat; Region=$sf.Region; Tier=$sf.Tier
-                            RiskType="Excessive Privileges"
-                            RiskDescription="Standard user/group holds dangerous admin flags: ($($excPerms -join ', '))."
-                            RemediationAction="Revoke administrative permissions from standard business users/groups."
-                            ExtractDate=$ExtractDate
-                        })
-                    }
-                }
-                # Check D1: Group naming SAFEMANAGER must have manager permissions
-                if ($mName -like "*$SafeManagerGroupSuffix") {
-                    if (-not $isMgr) {
-                        $missPerm = @()
-                        foreach ($p in $SafeManagerCheckPermissions) { if ($perms.$p -ne $true) { $missPerm += $p } }
-                        $RiskRows.Add([pscustomobject]@{
-                            SafeName=$safeName; MemberName=$mName; MemberType=$mType; IsSafeManager=$isMgr
-                            MemberCategory=$cat; Region=$sf.Region; Tier=$sf.Tier
-                            RiskType="Incorrect Naming Permissions (Manager)"
-                            RiskDescription="Group ends with '$SafeManagerGroupSuffix' but lacks required manager permissions: ($($missPerm -join ', '))."
-                            RemediationAction="Grant required admin permissions ($($missPerm -join ', ')) to this manager group."
-                            ExtractDate=$ExtractDate
-                        })
-                    }
-                }
-                # Check D2: Group naming USER should have limited permissions
-                elseif ($mName -like "*$UserGroupKeyword*") {
-                    $excUserPerms = @()
-                    foreach ($p in $AllPermissions) {
-                        if ($UserGroupAllowedPermissions -notcontains $p -and $perms.$p -eq $true) { $excUserPerms += $p }
-                    }
-                    if ($excUserPerms.Count -gt 0) {
-                        $RiskRows.Add([pscustomobject]@{
-                            SafeName=$safeName; MemberName=$mName; MemberType=$mType; IsSafeManager=$isMgr
-                            MemberCategory=$cat; Region=$sf.Region; Tier=$sf.Tier
-                            RiskType="Excessive Naming Permissions (User)"
-                            RiskDescription="Group name contains '$UserGroupKeyword' but has admin/mgmt permissions: ($($excUserPerms -join ', '))."
-                            RemediationAction="Revoke all admin and management permissions from this user group."
-                            ExtractDate=$ExtractDate
-                        })
-                    }
-                }
-                # Check D3: Non-standard group naming
-                elseif ($mType -eq "Group" -and -not $isDef) {
-                    $RiskRows.Add([pscustomobject]@{
-                        SafeName=$safeName; MemberName=$mName; MemberType=$mType; IsSafeManager=$isMgr
-                        MemberCategory=$cat; Region=$sf.Region; Tier=$sf.Tier
-                        RiskType="Non-Standard Group Naming"
-                        RiskDescription="Custom group does not follow standard naming conventions (should end with '$SafeManagerGroupSuffix' or contain '$UserGroupKeyword')."
-                        RemediationAction="Rename the group based on its functional role."
-                        ExtractDate=$ExtractDate
-                    })
-                }
-            }
 
             # Audit group tracking
             if ($AuditGroups -contains $mName) { $foundAuditGroups[$mName] = $perms }
@@ -1143,30 +866,8 @@ if ($CollectSafeMembers) {
             })
         }
 
-        # Safe-level risk checks (business safes only)
+        # Safe-level admin/breakglass audit (business safes only)
         if (-not $sf.IsDefault) {
-            # No Safe Manager
-            if (-not $hasSafeManager) {
-                $RiskRows.Add([pscustomobject]@{
-                    SafeName=$safeName; MemberName="N/A"; MemberType="N/A"; IsSafeManager=$false
-                    MemberCategory="N/A"; Region=$sf.Region; Tier=$sf.Tier
-                    RiskType="No Safe Manager"
-                    RiskDescription="No member has both manageSafe and manageSafeMembers permissions."
-                    RemediationAction="Assign an administrator group as Manager of this Safe."
-                    ExtractDate=$ExtractDate
-                })
-            }
-            # CPM Orphan
-            if (-not $sf.HasCPM) {
-                $RiskRows.Add([pscustomobject]@{
-                    SafeName=$safeName; MemberName="N/A"; MemberType="N/A"; IsSafeManager=$false
-                    MemberCategory="N/A"; Region=$sf.Region; Tier=$sf.Tier
-                    RiskType="Orphaned CPM"
-                    RiskDescription="Safe has no managing CPM assigned. Credentials will never rotate."
-                    RemediationAction="Assign a valid CPM user to this Safe."
-                    ExtractDate=$ExtractDate
-                })
-            }
             # Admin/BG Audit
             foreach ($ag in $AuditGroups) {
                 $gp = $foundAuditGroups[$ag]
@@ -1193,39 +894,12 @@ if ($CollectSafeMembers) {
 
     $memberSw.Stop()
     Write-Log "Safe Members: $($MemberRows.Count) rows in $([Math]::Round($memberSw.Elapsed.TotalSeconds,1))s" SUCCESS
-    Write-Log "Risk Findings: $($RiskRows.Count)" $(if ($RiskRows.Count -gt 0) { "WARN" } else { "SUCCESS" })
     Write-Log "Admin Audit: $($AdminAuditRows.Count)" SUCCESS
 } else {
-    Write-Log "=== Step 13: Safe Members + Risk Audit SKIPPED (opt-in off) ===" SECTION
+    Write-Log "=== Step 13: Safe Members + Admin Audit SKIPPED (opt-in off) ===" SECTION
     Write-Log "  Set `$CollectSafeMembers=`$true to enable (1 API call per safe)." WARN
-
-    # Still flag CPM orphan and naming risks from DIM_Safe data (no API calls needed)
-    foreach ($sf in $bizSafes) {
-        if (-not $sf.HasCPM) {
-            $RiskRows.Add([pscustomobject]@{
-                SafeName=$sf.SafeName; MemberName="N/A"; MemberType="N/A"; IsSafeManager=$false
-                MemberCategory="N/A"; Region=$sf.Region; Tier=$sf.Tier
-                RiskType="Orphaned CPM"
-                RiskDescription="Safe has no managing CPM assigned. Credentials will never rotate."
-                RemediationAction="Assign a valid CPM user to this Safe."
-                ExtractDate=$ExtractDate
-            })
-        }
-        if (-not $sf.NamingCompliant) {
-            $RiskRows.Add([pscustomobject]@{
-                SafeName=$sf.SafeName; MemberName="N/A"; MemberType="N/A"; IsSafeManager=$false
-                MemberCategory="N/A"; Region=$sf.Region; Tier=$sf.Tier
-                RiskType="Non-Standard Safe Name"
-                RiskDescription="Safe name does not match expected naming pattern: $SafeNameExpectedRegex"
-                RemediationAction="Rename the safe to follow the standard naming convention (REGION-APP-TIER-...)."
-                ExtractDate=$ExtractDate
-            })
-        }
-    }
-    if ($RiskRows.Count -gt 0) { Write-Log "Risk Findings (from safe-level checks): $($RiskRows.Count)" WARN }
 }
 $RecordCounts["FACT_SafeMembers"] = $MemberRows.Count
-$RecordCounts["FACT_RiskFindings"] = $RiskRows.Count
 $RecordCounts["FACT_AdminAudit"] = $AdminAuditRows.Count
 
 
@@ -1279,11 +953,6 @@ Add-Metric "Dormant Users" "All" (@($realUsers | Where-Object { $_.LoginStatus -
 Add-Metric "Never Logged In Users" "All" (@($realUsers | Where-Object { $_.LoginStatus -eq 'Never Logged In' }).Count)
 
 
-
-# Risk (if collected)
-if ($RiskRows.Count -gt 0) {
-    foreach ($g in $RiskRows | Group-Object RiskType) { Add-Metric "Risk Findings by Type" $g.Name $g.Count }
-}
 
 # Onboarding trend
 Write-Log "Building onboarding trend (last $TrendLookbackMonths months)..." INFO
@@ -1392,8 +1061,6 @@ $CsvExports = @(
        Cols=@("PlatformID","PlatformName","SystemType","Active","PlatformBaseID","PlatformType","OSCategory","RotationDays","ExtractDate") },
     @{ Name="DIM_Safe";              Data=$DimSafe;              File="$LatestDir\DIM_Safe.csv";
        Cols=@("SafeName","SafeUrlId","SafeNumber","Description","Location","Creator","ManagingCPM","NumberOfAccounts","OLACEnabled","AutoPurge","RetentionVersions","RetentionDays","CreatedDate","CreatedDateTime","LastModifiedDateTime","IsDefault","SafeType","Region","Tier","HasCPM","IsEmpty","RecentlyCreated","NamingCompliant","ExtractDate") },
-    @{ Name="DIM_Connector";         Data=$ConnectorRows;        File="$LatestDir\DIM_Connector.csv";
-       Cols=@("ConnectorID","Hostname","IPAddress","OS","Status","AgentVersion","PlatformType","InstalledAt","UpdatedAt","ExtractDate") },
     @{ Name="FACT_Accounts";         Data=$FactAccounts;         File="$LatestDir\FACT_Accounts.csv";
        Cols=@("AccountID","Name","UserName","Address","SafeName","PlatformID","SecretType","IsDefaultSafe","SafeType","Region","Tier","OSCategory","AutoManaged","MgmtTechnique","ManualReason","ComplianceStatus","SecretStatus","LastChangeDate","LastChangeDateTime","DaysSinceChange","ExpectedRotationDays","RotationOverdue","LastVerifyDate","DaysSinceVerify","VerifyStatus","LastReconciledDate","IsStale","CreatedDate","CreatedMonth","AccountAgeDays","RecentlyOnboarded","NameCompliant","AddressCompliant","HasAddress","ExtractDate") },
     @{ Name="FACT_Users";            Data=$FactUsers;            File="$LatestDir\FACT_Users.csv";
@@ -1404,20 +1071,10 @@ $CsvExports = @(
        Cols=@("AccountID","AccountName","Address","PlatformID","SafeName","Region","Tier","CPMStatus","ManualReason","LastModified","LastVerified","LastReconciled","CreatedDate","ExtractDate") },
     @{ Name="FACT_PlatformSummary";  Data=$FactPlatformSummary;  File="$LatestDir\FACT_PlatformSummary.csv";
        Cols=@("PlatformID","TotalAccounts","ManagedCount","UnmanagedCount","SuccessCount","FailedCount","ManagedPct","SuccessRatePct","IsUsed","ExtractDate") },
-    @{ Name="FACT_SystemHealth";     Data=$HealthRows;           File="$LatestDir\FACT_SystemHealth.csv";
-       Cols=@("ComponentID","ComponentName","Description","ConnectedCount","TotalCount","SpecificStat","ExtractDate") },
     @{ Name="FACT_VaultConnectivity";Data=$VaultRows;            File="$LatestDir\FACT_VaultConnectivity.csv";
        Cols=@("ComponentType","InstanceIP","VaultUserName","ComponentVersion","IsLoggedOn","LastLogonDate","ExtractDate") },
-    @{ Name="FACT_ComponentHealth";  Data=$ComponentRows;        File="$LatestDir\FACT_ComponentHealth.csv";
-       Cols=@("ConnectorID","Hostname","ComponentID","ComponentType","Status","Version","InstalledAt","UpdatedAt","ExtractDate") },
-    @{ Name="FACT_PortalHealth";     Data=$PortalRows;           File="$LatestDir\FACT_PortalHealth.csv";
-       Cols=@("EndpointName","URL","HTTPStatus","ResponseStatus","LatencyMs","ExtractDate") },
-    @{ Name="FACT_ActiveSessions";   Data=$SessionRows;          File="$LatestDir\FACT_ActiveSessions.csv";
-       Cols=@("SessionID","User","FromIP","AccountName","RemoteMachine","Platform","PSMServer","ConnectionComponent","Protocol","Client","StartTime","Duration","RiskScore","IsLive","ExtractDate") },
     @{ Name="FACT_SafeMembers";      Data=$MemberRows;           File="$LatestDir\FACT_SafeMembers.csv";
        Cols=@("SafeName","IsDefaultSafe","Region","Tier","MemberName","MemberID","MemberType","IsDefaultMember","IsSafeManager","MemberCategory","IsPredefinedUser","IsReadOnly","MembershipExpirationDate","Permissions","ExtractDate") },
-    @{ Name="FACT_RiskFindings";     Data=$RiskRows;             File="$LatestDir\FACT_RiskFindings.csv";
-       Cols=@("SafeName","MemberName","MemberType","IsSafeManager","MemberCategory","Region","Tier","RiskType","RiskDescription","RemediationAction","ExtractDate") },
     @{ Name="FACT_AdminAudit";       Data=$AdminAuditRows;       File="$LatestDir\FACT_AdminAudit.csv";
        Cols=@("SafeName","IsDefaultSafe","Region","Tier","GroupName","GroupExists","PermissionLevel","MissingPermissions","ExtractDate") },
     @{ Name="FACT_OnboardingTrend";  Data=$TrendRows;            File="$LatestDir\FACT_OnboardingTrend.csv";
@@ -1518,14 +1175,10 @@ Write-Host ("  Stale (>= {0}d)      : {1}" -f $StaleAccountDays, @($biz | Where-
 Write-Host ("  Non-standard Names  : {0} safes" -f @($bizSafes | Where-Object { -not $_.NamingCompliant }).Count) `
     -ForegroundColor $(if (@($bizSafes | Where-Object { -not $_.NamingCompliant }).Count -gt 0) { "Yellow" } else { "Green" })
 
-# ── Infrastructure
+# ── Infrastructure (Vault Connectivity)
 Write-Host ""
-Write-Host "  INFRASTRUCTURE" -ForegroundColor Cyan
+Write-Host "  INFRASTRUCTURE (VAULT CONNECTIVITY)" -ForegroundColor Cyan
 Write-Host $SubDivider -ForegroundColor DarkGray
-$connActive = @($ConnectorRows | Where-Object { $_.Status -eq "Active" }).Count
-Write-Host ("  Connector Servers   : {0} total | {1} active" -f $ConnectorRows.Count, $connActive) `
-    -ForegroundColor $(if ($ConnectorRows.Count -gt 0 -and $connActive -lt $ConnectorRows.Count) { "Yellow" } else { "White" })
-Write-Host ("  Components          : {0}" -f $ComponentRows.Count) -ForegroundColor White
 foreach ($compType in $VaultComponentIDs) {
     $typeRows  = @($VaultRows | Where-Object { $_.ComponentType -eq $compType })
     $loggedOn  = @($typeRows | Where-Object { $_.IsLoggedOn -eq "TRUE" }).Count
@@ -1534,11 +1187,6 @@ foreach ($compType in $VaultComponentIDs) {
         Write-Host ("  {0,-20} : {1} total | {2} connected" -f $label, $typeRows.Count, $loggedOn) `
             -ForegroundColor $(if ($loggedOn -lt $typeRows.Count) { "Red" } else { "Green" })
     }
-}
-Write-Host ("  Active Sessions     : {0}" -f $SessionRows.Count) -ForegroundColor White
-foreach ($portal in $PortalRows) {
-    $color = switch -Wildcard ($portal.ResponseStatus) { "UP" { "Green" } "UP*" { "Green" } "DOWN" { "Red" } default { "Yellow" } }
-    Write-Host ("  {0,-20} : {1} | {2}ms" -f $portal.EndpointName, $portal.ResponseStatus, $portal.LatencyMs) -ForegroundColor $color
 }
 
 # ── CPM
@@ -1552,15 +1200,9 @@ Write-Host ("  Platforms Tracked   : {0}" -f $FactPlatformSummary.Count) -Foregr
 # ── Opt-in stages
 if ($CollectSafeMembers) {
     Write-Host ""
-    Write-Host "  SAFE MEMBERS & RISK AUDIT" -ForegroundColor Cyan
+    Write-Host "  SAFE MEMBERS & ADMIN AUDIT" -ForegroundColor Cyan
     Write-Host $SubDivider -ForegroundColor DarkGray
     Write-Host ("  Safe Members        : {0}" -f $MemberRows.Count) -ForegroundColor White
-    Write-Host ("  Risk Findings       : {0}" -f $RiskRows.Count) -ForegroundColor $(if ($RiskRows.Count -gt 0) { "Red" } else { "Green" })
-    if ($RiskRows.Count -gt 0) {
-        foreach ($g in ($RiskRows | Group-Object RiskType | Sort-Object Count -Descending)) {
-            Write-Host ("    {0,-35} : {1}" -f $g.Name, $g.Count) -ForegroundColor Yellow
-        }
-    }
     Write-Host ("  Admin Audit Rows    : {0}" -f $AdminAuditRows.Count) -ForegroundColor White
 }
 
