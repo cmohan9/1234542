@@ -1,15 +1,20 @@
-# CyberArk Privilege Cloud — Power BI Dashboard Guide (V6)
+# CyberArk Privilege Cloud — Power BI Dashboard Guide (V7)
 
-Complete setup guide for building the dashboard from the **V6 script** CSV output.
+**Companion to:** `Antigravity_Dashboard_Script_V6.ps1` (the script is unchanged from V6 —
+this is a guide revision with corrected DAX and much more detailed page-build steps).
 
-> **What changed vs. the original guide**
-> - Removed data sources (no longer produced by the script): `FACT_SystemHealth`,
->   `FACT_PortalHealth`, `FACT_ActiveSessions`, `DIM_Connector`, `FACT_ComponentHealth`,
->   and `FACT_RiskFindings`.
-> - Retained from the safe-members stage: `FACT_SafeMembers` and `FACT_AdminAudit`.
-> - New `SafeType` column on `DIM_Safe` and `FACT_Accounts`
->   (`Personal Admin` / `Shared Admin` / `Standard Business` / `System/Default`).
-> - Output is now **14 CSVs**. Pages reduced from 8 to 7.
+This guide takes you from the 14 CSVs in the `Latest/` folder to a finished 7-page report,
+**assuming no prior Power BI experience**. Follow it top to bottom.
+
+> [!IMPORTANT]
+> **About TRUE/FALSE in DAX.** The script writes boolean columns (e.g. `IsDefaultSafe`,
+> `AutoManaged`, `HasCPM`, `IsEmpty`, `NamingCompliant`, `IsStale`, `RotationOverdue`,
+> `IsComponent`, `IsLoggedOn`) into the CSVs as **text** (`True`/`False` or `TRUE`/`FALSE`).
+> When Power BI imports them as a **Text** column, you must compare them as quoted strings:
+> `= "TRUE"` / `= "FALSE"`, **not** `= TRUE` / `= FALSE`. All measures below already do this.
+> DAX text comparisons are **case-insensitive**, so `"TRUE"` matches `True`, `true`, or `TRUE`.
+> If a measure ever returns 0/blank unexpectedly, click the column in Data view and confirm
+> the actual text (some columns show `True`, some `TRUE` — both still match).
 
 ---
 
@@ -28,239 +33,214 @@ Complete setup guide for building the dashboard from the **V6 script** CSV outpu
 | | `FACT_OnboardingTrend` |
 | | `FACT_MetricsSummary` |
 
-> `FACT_SafeMembers` and `FACT_AdminAudit` only contain rows when the script is run
-> with `$CollectSafeMembers = $true`. When off, they are written as header-only CSVs
-> so the model still loads.
+> `FACT_SafeMembers` and `FACT_AdminAudit` only contain rows when the script runs with
+> `$CollectSafeMembers = $true`. Otherwise they are header-only CSVs (Page 8 will be empty
+> but the model still loads).
 
 ---
 
 ## Step 1: Import Data
 
-1. Open **Power BI Desktop** → `Get Data` → `Text/CSV`
-2. Navigate to your `Latest/` folder
-3. Import each CSV file one by one (or use `Get Data → Folder` and point to `Latest/`)
-4. In Power Query Editor for each table:
-   - Ensure `DateKey`, `CreatedDate`, `LastChangeDate` etc. are typed as **Date**
-   - Ensure numeric columns (`NumberOfAccounts`, `DaysSinceChange`, etc.) are typed as **Whole Number** or **Decimal**
-   - Ensure boolean-like columns (`TRUE`/`FALSE` strings) are kept as **Text** (we'll handle them in DAX)
-5. Click **Close & Apply**
-
-> **Tip**: Use `Get Data → Folder`, select `Latest/`, click **Combine & Transform**. This loads all CSVs at once. Rename each query to match the filename (remove `.csv`).
+1. Open **Power BI Desktop** → **Home** ribbon → **Get data** → **Text/CSV**.
+2. Browse to your `Latest/` folder and import each CSV (or use **Get data → Folder**,
+   point at `Latest/`, then **Combine & Transform**).
+3. For each query in **Transform data** (Power Query Editor), set column types:
+   - Date columns (`DateKey`, `CreatedDate`, `LastChangeDate`, `LastVerifyDate`,
+     `LastLoginDate`, `LastLogonDate`, …) → **Date** (or Date/Time).
+   - Count/number columns (`NumberOfAccounts`, `DaysSinceChange`, `DaysSinceLogin`,
+     `AccountsOnboarded`, `LatencyMs`, `ManagedPct`, …) → **Whole Number** / **Decimal**.
+   - Boolean-like columns (`IsDefaultSafe`, `AutoManaged`, `HasCPM`, `IsEmpty`,
+     `NamingCompliant`, `IsStale`, `RotationOverdue`, `IsComponent`, `IsLoggedOn`, …)
+     → **leave as Text** (the DAX in this guide expects text).
+4. **Close & Apply**.
+5. Rename each query to match its filename without `.csv` (e.g. `FACT_Accounts`).
 
 ---
 
 ## Step 2: Relationships (Star Schema)
 
-Go to **Model View** and create these relationships:
+Open **Model view** (left sidebar, third icon). Create relationships by dragging the
+*From* column onto the *To* column. Set cardinality/cross-filter in the dialog.
 
-| # | From Table | From Column | To Table | To Column | Cardinality | Cross-filter |
-|---|-----------|-------------|----------|-----------|-------------|-------------|
-| 1 | `FACT_Accounts` | `SafeName` | `DIM_Safe` | `SafeName` | Many → One | Both |
-| 2 | `FACT_Accounts` | `PlatformID` | `DIM_Platform` | `PlatformID` | Many → One | Both |
-| 3 | `FACT_Accounts` | `Region` | `DIM_Region` | `RegionKey` | Many → One | Both |
-| 4 | `FACT_Accounts` | `CreatedDate` | `DIM_Date` | `DateKey` | Many → One | Single |
-| 5 | `FACT_CPMFailed` | `PlatformID` | `DIM_Platform` | `PlatformID` | Many → One | Single |
-| 6 | `FACT_CPMFailed` | `SafeName` | `DIM_Safe` | `SafeName` | Many → One | Single |
-| 7 | `FACT_SafeMembers` | `SafeName` | `DIM_Safe` | `SafeName` | Many → One | Single |
-| 8 | `FACT_AdminAudit` | `SafeName` | `DIM_Safe` | `SafeName` | Many → One | Single |
-| 9 | `FACT_PlatformSummary` | `PlatformID` | `DIM_Platform` | `PlatformID` | Many → One | Single |
-| 10 | `DIM_Safe` | `Region` | `DIM_Region` | `RegionKey` | Many → One | Single |
-
-> [!IMPORTANT]
-> Relationships #1, #2, #3 should have **Cross-filter direction = Both**. All others **Single**.
+| # | From Table.Column | To Table.Column | Cardinality | Cross-filter |
+|---|-------------------|-----------------|-------------|-------------|
+| 1 | `FACT_Accounts.SafeName` | `DIM_Safe.SafeName` | Many → One | **Both** |
+| 2 | `FACT_Accounts.PlatformID` | `DIM_Platform.PlatformID` | Many → One | **Both** |
+| 3 | `FACT_Accounts.Region` | `DIM_Region.RegionKey` | Many → One | **Both** |
+| 4 | `FACT_Accounts.CreatedDate` | `DIM_Date.DateKey` | Many → One | Single |
+| 5 | `FACT_CPMFailed.PlatformID` | `DIM_Platform.PlatformID` | Many → One | Single |
+| 6 | `FACT_CPMFailed.SafeName` | `DIM_Safe.SafeName` | Many → One | Single |
+| 7 | `FACT_SafeMembers.SafeName` | `DIM_Safe.SafeName` | Many → One | Single |
+| 8 | `FACT_AdminAudit.SafeName` | `DIM_Safe.SafeName` | Many → One | Single |
+| 9 | `FACT_PlatformSummary.PlatformID` | `DIM_Platform.PlatformID` | Many → One | Single |
+| 10 | `DIM_Safe.Region` | `DIM_Region.RegionKey` | Many → One | Single |
 
 > [!NOTE]
-> **`FACT_OnboardingTrend` is intentionally NOT related to `DIM_Date`.** `DIM_Date`
-> has one row per day, so its `MonthKey` is not unique and Power BI would reject a
-> many-to-one join. The onboarding visuals use `FACT_OnboardingTrend[Month]` directly
-> on their axis, so no relationship is needed. `FACT_VaultConnectivity` is also
-> standalone (report-scoped tables, filtered by their own columns).
-
-```mermaid
-graph LR
-    DIM_Date --> FACT_Accounts
-    DIM_Region --> FACT_Accounts
-    DIM_Region --> DIM_Safe
-    DIM_Platform --> FACT_Accounts
-    DIM_Platform --> FACT_CPMFailed
-    DIM_Platform --> FACT_PlatformSummary
-    DIM_Safe --> FACT_Accounts
-    DIM_Safe --> FACT_SafeMembers
-    DIM_Safe --> FACT_AdminAudit
-    DIM_Safe --> FACT_CPMFailed
-```
+> Do **not** relate `FACT_OnboardingTrend` or `FACT_VaultConnectivity` to anything.
+> `DIM_Date.MonthKey` is not unique (one row per day), so the onboarding trend would be
+> rejected — its visuals use `FACT_OnboardingTrend[Month]` directly instead.
 
 ---
 
 ## Step 3: DAX Measures
 
-Create a new table called **_Measures** (`Modeling` → `New Table` → `_Measures = {BLANK()}`). Put all measures here.
+Create a home for measures: **Modeling → New table** → `_Measures = {BLANK()}`.
+Then **Modeling → New measure** for each block below (paste one at a time).
 
 ### 3.1 Core Account Metrics
-
 ```dax
 Total Accounts = COUNTROWS(FACT_Accounts)
 
-Business Accounts = 
-CALCULATE(COUNTROWS(FACT_Accounts), FACT_Accounts[IsDefaultSafe] = FALSE)
+Business Accounts =
+CALCULATE(COUNTROWS(FACT_Accounts), FACT_Accounts[IsDefaultSafe] = "FALSE")
 
-Compliant Accounts = 
-CALCULATE(COUNTROWS(FACT_Accounts), 
+Compliant Accounts =
+CALCULATE(COUNTROWS(FACT_Accounts),
     FACT_Accounts[ComplianceStatus] = "Compliant",
-    FACT_Accounts[IsDefaultSafe] = FALSE)
+    FACT_Accounts[IsDefaultSafe] = "FALSE")
 
-Non-Compliant Accounts = 
-CALCULATE(COUNTROWS(FACT_Accounts), 
+Non-Compliant Accounts =
+CALCULATE(COUNTROWS(FACT_Accounts),
     FACT_Accounts[ComplianceStatus] = "Non-Compliant",
-    FACT_Accounts[IsDefaultSafe] = FALSE)
+    FACT_Accounts[IsDefaultSafe] = "FALSE")
 
-Pending Accounts = 
-CALCULATE(COUNTROWS(FACT_Accounts), 
+Pending Accounts =
+CALCULATE(COUNTROWS(FACT_Accounts),
     FACT_Accounts[ComplianceStatus] = "Pending/Unknown",
-    FACT_Accounts[IsDefaultSafe] = FALSE)
+    FACT_Accounts[IsDefaultSafe] = "FALSE")
 
-Compliance Rate % = 
-DIVIDE([Compliant Accounts], [Business Accounts], 0) * 100
+Compliance Rate % = DIVIDE([Compliant Accounts], [Business Accounts], 0) * 100
 
-APM Accounts = 
-CALCULATE(COUNTROWS(FACT_Accounts), 
-    FACT_Accounts[AutoManaged] = TRUE,
-    FACT_Accounts[IsDefaultSafe] = FALSE)
+APM Accounts =
+CALCULATE(COUNTROWS(FACT_Accounts),
+    FACT_Accounts[AutoManaged] = "TRUE",
+    FACT_Accounts[IsDefaultSafe] = "FALSE")
 
-MPM Accounts = 
-CALCULATE(COUNTROWS(FACT_Accounts), 
-    FACT_Accounts[AutoManaged] = FALSE,
-    FACT_Accounts[IsDefaultSafe] = FALSE)
+MPM Accounts =
+CALCULATE(COUNTROWS(FACT_Accounts),
+    FACT_Accounts[AutoManaged] = "FALSE",
+    FACT_Accounts[IsDefaultSafe] = "FALSE")
 
-APM Rate % = 
-DIVIDE([APM Accounts], [Business Accounts], 0) * 100
+APM Rate % = DIVIDE([APM Accounts], [Business Accounts], 0) * 100
 ```
 
 ### 3.2 Rotation & Staleness
-
 ```dax
-Rotation Overdue = 
-CALCULATE(COUNTROWS(FACT_Accounts), 
-    FACT_Accounts[RotationOverdue] = TRUE,
-    FACT_Accounts[IsDefaultSafe] = FALSE)
+Rotation Overdue =
+CALCULATE(COUNTROWS(FACT_Accounts),
+    FACT_Accounts[RotationOverdue] = "TRUE",
+    FACT_Accounts[IsDefaultSafe] = "FALSE")
 
-Stale Accounts = 
-CALCULATE(COUNTROWS(FACT_Accounts), 
-    FACT_Accounts[IsStale] = TRUE,
-    FACT_Accounts[IsDefaultSafe] = FALSE)
+Stale Accounts =
+CALCULATE(COUNTROWS(FACT_Accounts),
+    FACT_Accounts[IsStale] = "TRUE",
+    FACT_Accounts[IsDefaultSafe] = "FALSE")
 
-Never Verified = 
-CALCULATE(COUNTROWS(FACT_Accounts), 
+Never Verified =
+CALCULATE(COUNTROWS(FACT_Accounts),
     FACT_Accounts[VerifyStatus] = "Never Verified",
-    FACT_Accounts[IsDefaultSafe] = FALSE)
+    FACT_Accounts[IsDefaultSafe] = "FALSE")
 
-Avg Password Age Days = 
+Avg Password Age Days =
 CALCULATE(
     AVERAGE(FACT_Accounts[DaysSinceChange]),
-    FACT_Accounts[IsDefaultSafe] = FALSE,
-    NOT(ISBLANK(FACT_Accounts[DaysSinceChange]))
-)
+    FACT_Accounts[IsDefaultSafe] = "FALSE",
+    NOT(ISBLANK(FACT_Accounts[DaysSinceChange])))
 ```
 
 ### 3.3 Safe Metrics (incl. SafeType)
-
 ```dax
 Total Safes = COUNTROWS(DIM_Safe)
 
-Business Safes = 
-CALCULATE(COUNTROWS(DIM_Safe), DIM_Safe[IsDefault] = FALSE)
+Business Safes =
+CALCULATE(COUNTROWS(DIM_Safe), DIM_Safe[IsDefault] = "FALSE")
 
-Empty Safes = 
-CALCULATE(COUNTROWS(DIM_Safe), DIM_Safe[IsEmpty] = TRUE, DIM_Safe[IsDefault] = FALSE)
+Empty Safes =
+CALCULATE(COUNTROWS(DIM_Safe), DIM_Safe[IsEmpty] = "TRUE", DIM_Safe[IsDefault] = "FALSE")
 
-Safes Without CPM = 
-CALCULATE(COUNTROWS(DIM_Safe), DIM_Safe[HasCPM] = FALSE, DIM_Safe[IsDefault] = FALSE)
+Safes Without CPM =
+CALCULATE(COUNTROWS(DIM_Safe), DIM_Safe[HasCPM] = "FALSE", DIM_Safe[IsDefault] = "FALSE")
 
-Non-Standard Safe Names = 
-CALCULATE(COUNTROWS(DIM_Safe), DIM_Safe[NamingCompliant] = FALSE, DIM_Safe[IsDefault] = FALSE)
+Non-Standard Safe Names =
+CALCULATE(COUNTROWS(DIM_Safe), DIM_Safe[NamingCompliant] = "FALSE", DIM_Safe[IsDefault] = "FALSE")
 
-Recently Created Safes = 
-CALCULATE(COUNTROWS(DIM_Safe), DIM_Safe[RecentlyCreated] = TRUE, DIM_Safe[IsDefault] = FALSE)
+Recently Created Safes =
+CALCULATE(COUNTROWS(DIM_Safe), DIM_Safe[RecentlyCreated] = "TRUE", DIM_Safe[IsDefault] = "FALSE")
 
-Personal Admin Safes = 
+Personal Admin Safes =
 CALCULATE(COUNTROWS(DIM_Safe), DIM_Safe[SafeType] = "Personal Admin")
 
-Shared Admin Safes = 
+Shared Admin Safes =
 CALCULATE(COUNTROWS(DIM_Safe), DIM_Safe[SafeType] = "Shared Admin")
 
-Standard Business Safes = 
+Standard Business Safes =
 CALCULATE(COUNTROWS(DIM_Safe), DIM_Safe[SafeType] = "Standard Business")
 ```
 
 ### 3.4 User Metrics
-
 ```dax
 Total Users = COUNTROWS(FACT_Users)
 
-Real Users = 
-CALCULATE(COUNTROWS(FACT_Users), FACT_Users[IsComponent] = FALSE)
+Real Users =
+CALCULATE(COUNTROWS(FACT_Users), FACT_Users[IsComponent] = "FALSE")
 
-Active Users = 
-CALCULATE(COUNTROWS(FACT_Users), 
-    FACT_Users[IsComponent] = FALSE,
+Active Users =
+CALCULATE(COUNTROWS(FACT_Users),
+    FACT_Users[IsComponent] = "FALSE",
     CONTAINSSTRING(FACT_Users[LoginStatus], "Active"))
 
-Dormant Users = 
-CALCULATE(COUNTROWS(FACT_Users), 
-    FACT_Users[IsComponent] = FALSE,
+Dormant Users =
+CALCULATE(COUNTROWS(FACT_Users),
+    FACT_Users[IsComponent] = "FALSE",
     CONTAINSSTRING(FACT_Users[LoginStatus], "Dormant"))
 
-Never Logged In Users = 
-CALCULATE(COUNTROWS(FACT_Users), 
-    FACT_Users[IsComponent] = FALSE,
+Never Logged In Users =
+CALCULATE(COUNTROWS(FACT_Users),
+    FACT_Users[IsComponent] = "FALSE",
     FACT_Users[LoginStatus] = "Never Logged In")
 
-Active User Rate % = 
-DIVIDE([Active Users], [Real Users], 0) * 100
+Active User Rate % = DIVIDE([Active Users], [Real Users], 0) * 100
 ```
 
 ### 3.5 CPM & Platform Metrics
-
 ```dax
 CPM Failed Count = COUNTROWS(FACT_CPMFailed)
 
-CPM Success Rate % = 
-VAR _managed = CALCULATE(COUNTROWS(FACT_Accounts), 
-    FACT_Accounts[AutoManaged] = TRUE, FACT_Accounts[IsDefaultSafe] = FALSE)
-VAR _success = CALCULATE(COUNTROWS(FACT_Accounts), 
-    FACT_Accounts[AutoManaged] = TRUE, 
+CPM Success Rate % =
+VAR _managed = CALCULATE(COUNTROWS(FACT_Accounts),
+    FACT_Accounts[AutoManaged] = "TRUE", FACT_Accounts[IsDefaultSafe] = "FALSE")
+VAR _success = CALCULATE(COUNTROWS(FACT_Accounts),
+    FACT_Accounts[AutoManaged] = "TRUE",
     FACT_Accounts[ComplianceStatus] = "Compliant",
-    FACT_Accounts[IsDefaultSafe] = FALSE)
+    FACT_Accounts[IsDefaultSafe] = "FALSE")
 RETURN DIVIDE(_success, _managed, 0) * 100
 ```
 
 ### 3.6 Vault Connectivity Metrics
-
 ```dax
 Vault Components Total = COUNTROWS(FACT_VaultConnectivity)
 
-Vault Components Connected = 
+Vault Components Connected =
 CALCULATE(COUNTROWS(FACT_VaultConnectivity), FACT_VaultConnectivity[IsLoggedOn] = "TRUE")
 
-Vault Connectivity % = 
+Vault Connectivity % =
 DIVIDE([Vault Components Connected], [Vault Components Total], 0) * 100
 ```
 
 ### 3.7 Onboarding Trend
-
 ```dax
-Recently Onboarded Accounts = 
+Recently Onboarded Accounts =
 CALCULATE(COUNTROWS(FACT_Accounts),
-    FACT_Accounts[RecentlyOnboarded] = TRUE,
-    FACT_Accounts[IsDefaultSafe] = FALSE)
+    FACT_Accounts[RecentlyOnboarded] = "TRUE",
+    FACT_Accounts[IsDefaultSafe] = "FALSE")
 
-Cumulative Accounts = 
+Cumulative Accounts =
 CALCULATE(
     SUM(FACT_OnboardingTrend[AccountsOnboarded]),
     FILTER(ALL(FACT_OnboardingTrend),
         FACT_OnboardingTrend[Month] <= MAX(FACT_OnboardingTrend[Month])))
 
-Cumulative Safes = 
+Cumulative Safes =
 CALCULATE(
     SUM(FACT_OnboardingTrend[SafesCreated]),
     FILTER(ALL(FACT_OnboardingTrend),
@@ -270,27 +250,28 @@ Avg Monthly Onboarding = AVERAGE(FACT_OnboardingTrend[AccountsOnboarded])
 ```
 
 ### 3.8 Admin/Breakglass Audit (opt-in)
-
 ```dax
-Admin Groups Compliance % = 
+Admin Groups Compliance % =
 VAR _total = COUNTROWS(FACT_AdminAudit)
 VAR _full = CALCULATE(COUNTROWS(FACT_AdminAudit), FACT_AdminAudit[PermissionLevel] = "Full")
 RETURN DIVIDE(_full, _total, 0) * 100
 
-Admin Groups Missing = 
+Admin Groups Missing =
 CALCULATE(COUNTROWS(FACT_AdminAudit), FACT_AdminAudit[GroupExists] = "No")
+
+Safe Member Assignments = COUNTROWS(FACT_SafeMembers)
 ```
 
-### 3.9 Conditional Formatting Helpers
-
+### 3.9 Conditional-Formatting Color Helpers
+> `TRUE()` here is the DAX **function** used by `SWITCH` — do not put it in quotes.
 ```dax
-Compliance Color = 
+Compliance Color =
 SWITCH(TRUE(),
     [Compliance Rate %] >= 90, "#10B981",
     [Compliance Rate %] >= 70, "#F59E0B",
     "#EF4444")
 
-Connectivity Color = 
+Connectivity Color =
 SWITCH(TRUE(),
     [Vault Connectivity %] >= 95, "#10B981",
     [Vault Connectivity %] >= 80, "#F59E0B",
@@ -299,216 +280,378 @@ SWITCH(TRUE(),
 
 ---
 
-## Step 4: Dashboard Pages (7)
+## Step 4: Build the Dashboard Pages (detailed)
+
+### 4.0 How to read these instructions (READ THIS FIRST)
+
+Every Power BI visual has **field wells** — labelled boxes in the **Visualizations** pane
+where you drag fields/measures. Which wells exist depends on the visual:
+
+| Visual | Field wells (buckets) |
+|--------|-----------------------|
+| **Card** | *Fields* (one measure) |
+| **Multi-row card** | *Fields* (several measures) |
+| **Gauge** | *Value*, *Minimum*, *Maximum*, *Target* |
+| **Clustered/Stacked _column_** (vertical bars) | *X-axis* = category, *Y-axis* = number, *Legend* = series, *Tooltips* |
+| **Clustered/Stacked _bar_** (horizontal bars) | *Y-axis* = category, *X-axis* = number, *Legend* = series, *Tooltips* |
+| **Line** | *X-axis* = category/date, *Y-axis* = number, *Legend* = series |
+| **Line and stacked/clustered column (combo)** | *X-axis*, *Column y-axis*, *Line y-axis*, *Legend* |
+| **Pie / Doughnut** | *Legend* = category, *Values* = number, *Detail*, *Tooltips* |
+| **Treemap** | *Category*, *Details*, *Values*, *Tooltips* |
+| **Matrix** | *Rows*, *Columns*, *Values* |
+| **Table** | *Columns* |
+| **Slicer** | *Field* |
+
+**Two golden rules:**
+1. A **category** (text you want to split/group by — e.g. `Region`, `SafeType`,
+   `ComplianceStatus`) goes in *Axis / Legend / Rows / Columns / Category*.
+2. A **number** (a measure like `[Business Accounts]`, or a numeric column you aggregate)
+   goes in *Values / X-axis(bar) / Y-axis(column)*.
+
+**"Count of X" vs a measure:** where a table below says *Values: count of AccountID*, drag the
+column `FACT_Accounts[AccountID]` into the Values well, then click its dropdown → **Count**.
+Where it says a measure like `[Business Accounts]`, drag that measure instead — no aggregation
+needed. **Prefer the measures** where provided; they already exclude default/system objects.
+
+**Visual-level filter:** to restrict one visual (not the whole page), select the visual, open
+the **Filters** pane → **Filters on this visual** → drag the field there → pick the value
+(e.g. `IsDefaultSafe` is `FALSE`). Type the value exactly (`FALSE`, case doesn't matter).
+
+**Slicer = on-screen filter the user clicks.** Insert a **Slicer** visual, drop one field in it.
+
+### 4.0.1 Recommended build order for every page
+1. Set page background (**Format your report page → Canvas background →** color `#0F172A`, transparency 0%).
+2. Add a **Text box** title top-left (16pt bold, white).
+3. Add the **slicer row** across the top.
+4. Add the **KPI card row** under the slicers.
+5. Add the charts/tables in the body.
+6. Apply formatting (Step 7 checklist).
 
 ### Color Palette
-
 | Purpose | Hex |
-|---------|-----|
+|---|---|
 | Primary (CyberArk Blue) | `#1E3A5F` |
 | Accent (Teal) | `#0EA5E9` |
-| Success / Compliant | `#10B981` |
-| Warning / Overdue | `#F59E0B` |
-| Error / Failed | `#EF4444` |
-| Neutral / Default | `#64748B` |
+| Success | `#10B981` |
+| Warning | `#F59E0B` |
+| Error | `#EF4444` |
 | Background | `#0F172A` |
-| Card Background | `#1E293B` |
+| Card background | `#1E293B` |
 | Text | `#F8FAFC` |
 | Subtext | `#94A3B8` |
 
-> Set page background to `#0F172A` (dark mode) for all pages.
+---
+
+### 🏠 Page 1 — Executive Summary
+
+**Slicers (top row):** insert 3 Slicer visuals.
+- Slicer 1 → *Field*: `DIM_Region[RegionKey]`
+- Slicer 2 → *Field*: `DIM_Safe[Tier]`
+- Slicer 3 → *Field*: `DIM_Safe[SafeType]`
+
+**KPI cards (row under slicers):** insert 6 **Card** visuals; drop one measure in each *Fields* well.
+| Card | *Fields* (measure) | Conditional color (Format → Callout value → fx) |
+|---|---|---|
+| 1 | `[Business Accounts]` | — |
+| 2 | `[Business Safes]` | — |
+| 3 | `[Compliance Rate %]` | via `[Compliance Color]` |
+| 4 | `[CPM Failed Count]` | green if 0, red if >0 |
+| 5 | `[Active Users]` | — |
+| 6 | `[Rotation Overdue]` | red if >0 |
+
+**Body visuals:**
+
+1. **Doughnut — Compliance split**
+   - *Legend*: `FACT_Accounts[ComplianceStatus]`
+   - *Values*: `FACT_Accounts[AccountID]` → set to **Count**
+   - *Filter on this visual*: `FACT_Accounts[IsDefaultSafe]` is `FALSE`
+   - Colours: Compliant=green, Non-Compliant=red, Pending/Unknown=amber.
+
+2. **Stacked column — Accounts by Region, split by Tier**
+   - *X-axis*: `DIM_Region[RegionKey]`
+   - *Y-axis*: `FACT_Accounts[AccountID]` → **Count**  *(or the measure `[Business Accounts]`)*
+   - *Legend*: `FACT_Accounts[Tier]`
+   - *Filter on this visual*: `FACT_Accounts[IsDefaultSafe]` is `FALSE`
+
+3. **Doughnut — Safe Type split** *(new)*
+   - *Legend*: `DIM_Safe[SafeType]`
+   - *Values*: `DIM_Safe[SafeName]` → **Count**
+   - *Filter*: `DIM_Safe[IsDefault]` is `FALSE`
+
+4. **Doughnut — APM vs MPM**
+   - *Legend*: `FACT_Accounts[MgmtTechnique]`
+   - *Values*: `FACT_Accounts[AccountID]` → **Count**
+   - *Filter*: `FACT_Accounts[IsDefaultSafe]` is `FALSE`
+
+5. **Bar (horizontal) — Top 10 safes by account count**
+   - *Y-axis*: `DIM_Safe[SafeName]`
+   - *X-axis*: `DIM_Safe[NumberOfAccounts]` → **Sum**
+   - *Filter*: `DIM_Safe[IsDefault]` is `FALSE`; and **Top N** filter → Top 10 by
+     `NumberOfAccounts` (Filters pane → SafeName → Filter type = Top N).
+
+6. **Multi-row card — watch list**
+   - *Fields* (add all four): `[Rotation Overdue]`, `[Stale Accounts]`,
+     `[Non-Standard Safe Names]`, `[Empty Safes]`.
 
 ---
 
-### Page 1: 🏠 Executive Summary
+### 📊 Page 2 — Account Inventory & Compliance
 
-**Purpose**: Single-glance KPI overview for leadership.
+**Slicers:** `DIM_Region[RegionKey]`, `DIM_Safe[Tier]`, `DIM_Safe[SafeType]`,
+`DIM_Platform[PlatformID]`, `FACT_Accounts[OSCategory]`, `FACT_Accounts[ComplianceStatus]`.
 
-| # | Visual Type | Fields | Notes |
-|---|------------|--------|-------|
-| 1 | **Card** | `[Business Accounts]` | |
-| 2 | **Card** | `[Business Safes]` | |
-| 3 | **Card** | `[Compliance Rate %]` | green ≥90, amber ≥70, red <70 |
-| 4 | **Card** | `[CPM Failed Count]` | green =0, red >0 |
-| 5 | **Card** | `[Active Users]` | |
-| 6 | **Card** | `[Rotation Overdue]` | amber/red if > 0 |
-| 7 | **Doughnut** | Legend: `ComplianceStatus`, Values: count | Filter `IsDefaultSafe = FALSE` |
-| 8 | **Stacked Bar** | Axis: `DIM_Region[RegionKey]`, Legend: `Tier`, Values: count | Filter `IsDefaultSafe = FALSE` |
-| 9 | **Doughnut** | Legend: `DIM_Safe[SafeType]`, Values: count of SafeName | **NEW** — safe-type split |
-| 10 | **Doughnut** | Legend: `MgmtTechnique`, Values: count | APM vs MPM |
-| 11 | **Bar** | Axis: `DIM_Safe[SafeName]`, Values: `NumberOfAccounts` | Top 10, `IsDefault = FALSE` |
-| 12 | **Multi-row Card** | `[Rotation Overdue]`, `[Stale Accounts]`, `[Non-Standard Safe Names]`, `[Empty Safes]` | red if > 0 |
+**KPI cards:** `[Business Accounts]`, `[Compliance Rate %]` (use `[Compliance Color]`),
+`[APM Rate %]`, `[Rotation Overdue]` (red if >0), `[Never Verified]` (red if >0).
 
-**Slicers**: `DIM_Region[RegionKey]`, `DIM_Safe[Tier]`, `DIM_Safe[SafeType]`.
+**Body visuals:**
 
----
+1. **Matrix — Region × Tier**
+   - *Rows*: `FACT_Accounts[Region]`
+   - *Columns*: `FACT_Accounts[Tier]`
+   - *Values*: `FACT_Accounts[AccountID]` → **Count**
+   - *Filter*: `IsDefaultSafe` is `FALSE`
+   - Format → **Cell elements → Background color → On** (heat-map effect).
 
-### Page 2: 📊 Account Inventory & Compliance
+2. **Stacked column — Compliance by OS**
+   - *X-axis*: `FACT_Accounts[OSCategory]`
+   - *Y-axis*: `FACT_Accounts[AccountID]` → **Count**
+   - *Legend*: `FACT_Accounts[ComplianceStatus]`
+   - *Filter*: `IsDefaultSafe` is `FALSE`
 
-| # | Visual Type | Fields |
-|---|------------|--------|
-| 1 | **Card** | `[Business Accounts]` |
-| 2 | **Card** | `[Compliance Rate %]` — conditional |
-| 3 | **Card** | `[APM Rate %]` |
-| 4 | **Card** | `[Rotation Overdue]` |
-| 5 | **Card** | `[Never Verified]` |
-| 6 | **Matrix** | Rows `FACT_Accounts[Region]`, Cols `FACT_Accounts[Tier]`, Values count. Filter `IsDefaultSafe = FALSE` |
-| 7 | **Stacked Bar** | Axis `OSCategory`, Legend `ComplianceStatus`, Values count |
-| 8 | **Clustered Bar** | Axis `Region`, Legend `VerifyStatus`, Values count |
-| 9 | **Treemap** | Group `PlatformID`, Values count, tooltip `OSCategory` |
-| 10 | **Table** | `Name`, `UserName`, `Address`, `SafeName`, `SafeType`, `PlatformID`, `Region`, `Tier`, `ComplianceStatus`, `DaysSinceChange`, `RotationOverdue`, `IsStale`, `VerifyStatus`. Filter `IsDefaultSafe = FALSE` |
+3. **Clustered column — Verify status by Region**
+   - *X-axis*: `FACT_Accounts[Region]`
+   - *Y-axis*: `FACT_Accounts[AccountID]` → **Count**
+   - *Legend*: `FACT_Accounts[VerifyStatus]`
+   - *Filter*: `IsDefaultSafe` is `FALSE`
 
-**Slicers**: `DIM_Region[RegionKey]`, `DIM_Safe[Tier]`, `DIM_Safe[SafeType]`, `DIM_Platform[PlatformID]`, `FACT_Accounts[OSCategory]`, `FACT_Accounts[ComplianceStatus]`.
+4. **Treemap — Accounts by Platform**
+   - *Category*: `FACT_Accounts[PlatformID]`
+   - *Values*: `FACT_Accounts[AccountID]` → **Count**
+   - *Details* (optional): `FACT_Accounts[OSCategory]`
 
----
-
-### Page 3: 📈 Onboarding Trend & Growth
-
-| # | Visual Type | Fields |
-|---|------------|--------|
-| 1 | **Card** | `[Recently Onboarded Accounts]` |
-| 2 | **Card** | `[Recently Created Safes]` |
-| 3 | **Card** | `[Avg Monthly Onboarding]` — decimal |
-| 4 | **Card** | `[Business Accounts]` |
-| 5 | **Combo Chart** | X `FACT_OnboardingTrend[Month]`, Column `SUM(AccountsOnboarded)`, Line `[Cumulative Accounts]` (secondary axis) |
-| 6 | **Bar** | Axis `FACT_OnboardingTrend[Month]`, Values `SUM(SafesCreated)` |
-| 7 | **Line** | X `FACT_OnboardingTrend[Month]`, Y `[Cumulative Safes]` |
-| 8 | **Stacked Bar** | Axis `FACT_Accounts[CreatedMonth]`, Legend `Region`, Values count. Filter `IsDefaultSafe = FALSE`, `CreatedMonth` not blank |
-
-**Slicers**: `DIM_Region[RegionKey]`, `DIM_Safe[Tier]`.
+5. **Table — account detail**
+   - *Columns* (in order): `Name`, `UserName`, `Address`, `SafeName`, `SafeType`,
+     `PlatformID`, `Region`, `Tier`, `ComplianceStatus`, `DaysSinceChange`,
+     `RotationOverdue`, `IsStale`, `VerifyStatus` — all from `FACT_Accounts`.
+   - *Filter*: `IsDefaultSafe` is `FALSE`.
 
 ---
 
-### Page 4: 🔐 Safe Inventory & Naming Compliance
+### 📈 Page 3 — Onboarding Trend & Growth
 
-| # | Visual Type | Fields |
-|---|------------|--------|
-| 1 | **Card** | `[Business Safes]` |
-| 2 | **Card** | `[Empty Safes]` — amber if > 0 |
-| 3 | **Card** | `[Safes Without CPM]` — red if > 0 |
-| 4 | **Card** | `[Non-Standard Safe Names]` — red if > 0 |
-| 5 | **Card** | `[Recently Created Safes]` |
-| 6 | **Pie** | Legend `DIM_Safe[Region]`, Values count. Filter `IsDefault = FALSE` |
-| 7 | **Stacked Bar** | Axis `DIM_Safe[SafeType]`, Legend `NamingCompliant`, Values count. Filter `IsDefault = FALSE` — **NEW SafeType axis** |
-| 8 | **Bar** | Axis `DIM_Safe[SafeName]`, Values `NumberOfAccounts`. Top 10, `IsDefault = FALSE` |
-| 9 | **Doughnut** | Legend `DIM_Safe[HasCPM]`, Values count. Filter `IsDefault = FALSE` |
-| 10 | **Table** | `SafeName`, `SafeType`, `Region`, `Tier`, `ManagingCPM`, `NumberOfAccounts`, `HasCPM`, `IsEmpty`, `NamingCompliant`, `CreatedDate`. Conditional: `NamingCompliant = FALSE` → red |
+**Slicers:** `DIM_Region[RegionKey]`, `DIM_Safe[Tier]`.
 
-**Slicers**: `DIM_Region[RegionKey]`, `DIM_Safe[Tier]`, `DIM_Safe[SafeType]`, `DIM_Safe[HasCPM]`, `DIM_Safe[IsEmpty]`.
+**KPI cards:** `[Recently Onboarded Accounts]`, `[Recently Created Safes]`,
+`[Avg Monthly Onboarding]` (format 1 decimal), `[Business Accounts]`.
 
----
+**Body visuals:**
 
-### Page 5: 👥 Users, Groups & Access Governance
+1. **Line and clustered column (combo) — onboarding over time**
+   - *X-axis*: `FACT_OnboardingTrend[Month]`
+   - *Column y-axis*: `FACT_OnboardingTrend[AccountsOnboarded]` → **Sum**
+   - *Line y-axis*: `[Cumulative Accounts]`
 
-| # | Visual Type | Fields |
-|---|------------|--------|
-| 1 | **Card** | `[Real Users]` |
-| 2 | **Card** | `[Active Users]` — green |
-| 3 | **Card** | `[Dormant Users]` — amber |
-| 4 | **Card** | `[Never Logged In Users]` — red |
-| 5 | **Card** | `COUNTROWS(FACT_Groups)` |
-| 6 | **Doughnut** | Legend `LoginStatus`, Values count. Filter `IsComponent = FALSE` |
-| 7 | **Bar** | Axis `VaultAuth`, Values count |
-| 8 | **Pie** | Legend `FACT_Groups[IsDefault]`, Values count |
-| 9 | **Table** | `UserName`, `LoginStatus`, `DaysSinceLogin`, `Source`, `Enabled`, `Suspended`. Filter `IsComponent = FALSE`, sort `DaysSinceLogin` desc |
+2. **Clustered column — safes created per month**
+   - *X-axis*: `FACT_OnboardingTrend[Month]`
+   - *Y-axis*: `FACT_OnboardingTrend[SafesCreated]` → **Sum**
 
-**Slicers**: `FACT_Users[LoginStatus]`, `FACT_Users[UserType]`.
+3. **Line — cumulative safes**
+   - *X-axis*: `FACT_OnboardingTrend[Month]`
+   - *Y-axis*: `[Cumulative Safes]`
+
+4. **Stacked column — accounts onboarded per month by Region**
+   - *X-axis*: `FACT_Accounts[CreatedMonth]`
+   - *Y-axis*: `FACT_Accounts[AccountID]` → **Count**
+   - *Legend*: `FACT_Accounts[Region]`
+   - *Filters*: `IsDefaultSafe` is `FALSE`; `CreatedMonth` **is not blank**.
 
 ---
 
-### Page 6: 🖥️ Vault Connectivity
+### 🔐 Page 4 — Safe Inventory & Naming Compliance
 
-**Purpose**: CPM / PSM / AIM component logon status against the vault.
-(This page replaces the old multi-source *Infrastructure* page; System Health, Portal
-Health, Connector servers, Component Health and Active Sessions are no longer collected.)
+**Slicers:** `DIM_Region[RegionKey]`, `DIM_Safe[Tier]`, `DIM_Safe[SafeType]`,
+`DIM_Safe[HasCPM]`, `DIM_Safe[IsEmpty]`.
 
-| # | Visual Type | Fields |
-|---|------------|--------|
-| 1 | **Card** | `[Vault Components Total]` |
-| 2 | **Card** | `[Vault Components Connected]` |
-| 3 | **Card** | `[Vault Connectivity %]` — conditional color |
-| 4 | **Clustered Bar** | Axis `FACT_VaultConnectivity[ComponentType]`, Values count, Legend `IsLoggedOn` |
-| 5 | **Table** | `ComponentType`, `InstanceIP`, `VaultUserName`, `ComponentVersion`, `IsLoggedOn`, `LastLogonDate`. Conditional: `IsLoggedOn = FALSE` → red row |
+**KPI cards:** `[Business Safes]`, `[Empty Safes]` (amber if >0),
+`[Safes Without CPM]` (red if >0), `[Non-Standard Safe Names]` (red if >0),
+`[Recently Created Safes]`.
 
-**Slicer**: `FACT_VaultConnectivity[ComponentType]` (CPM / SessionManagement / AIM).
+**Body visuals:**
+
+1. **Pie — safes by Region**
+   - *Legend*: `DIM_Safe[Region]`; *Values*: `DIM_Safe[SafeName]` → **Count**;
+     *Filter*: `IsDefault` is `FALSE`.
+
+2. **Stacked column — SafeType vs naming compliance** *(new)*
+   - *X-axis*: `DIM_Safe[SafeType]`
+   - *Y-axis*: `DIM_Safe[SafeName]` → **Count**
+   - *Legend*: `DIM_Safe[NamingCompliant]` (TRUE=green, FALSE=red)
+   - *Filter*: `IsDefault` is `FALSE`.
+
+3. **Bar (horizontal) — Top 10 safes by account count**
+   - *Y-axis*: `DIM_Safe[SafeName]`; *X-axis*: `DIM_Safe[NumberOfAccounts]` → **Sum**;
+     *Filter*: `IsDefault` is `FALSE` + **Top N** 10 by `NumberOfAccounts`.
+
+4. **Doughnut — CPM coverage**
+   - *Legend*: `DIM_Safe[HasCPM]`; *Values*: `DIM_Safe[SafeName]` → **Count**;
+     *Filter*: `IsDefault` is `FALSE`.
+
+5. **Table — safe detail**
+   - *Columns*: `SafeName`, `SafeType`, `Region`, `Tier`, `ManagingCPM`,
+     `NumberOfAccounts`, `HasCPM`, `IsEmpty`, `NamingCompliant`, `CreatedDate` (from `DIM_Safe`).
+   - *Filter*: `IsDefault` is `FALSE`.
+   - Format → **Cell elements** on the `NamingCompliant` column → Background color rule:
+     value `FALSE` → red.
 
 ---
 
-### Page 7: 🔍 CPM Operations & Failures
+### 👥 Page 5 — Users, Groups & Access Governance
 
-| # | Visual Type | Fields |
-|---|------------|--------|
-| 1 | **Card** | `[CPM Failed Count]` — red if > 0 |
-| 2 | **Card** | `[CPM Success Rate %]` — conditional |
-| 3 | **Card** | `[APM Accounts]` |
-| 4 | **Card** | `COUNTROWS(FACT_PlatformSummary)` |
-| 5 | **Bar** | Axis `FACT_PlatformSummary[PlatformID]`, Values `FailedCount`. Top 10, sort desc |
-| 6 | **Clustered Bar** | Axis `PlatformID`, Values `ManagedCount` + `UnmanagedCount`. Top 10 |
-| 7 | **Stacked Bar** | Axis `FACT_CPMFailed[Region]`, Values count, Legend `CPMStatus` |
-| 8 | **Doughnut** | Legend `FACT_CPMFailed[Tier]`, Values count |
-| 9 | **Table** | `AccountName`, `Address`, `PlatformID`, `SafeName`, `Region`, `Tier`, `CPMStatus`, `ManualReason`, `LastModified`, `LastVerified`. Conditional on `CPMStatus` |
+**Slicers:** `FACT_Users[LoginStatus]`, `FACT_Users[UserType]`.
 
-**Slicers**: `DIM_Platform[PlatformID]`, `DIM_Region[RegionKey]`, `DIM_Safe[Tier]`.
+**KPI cards:** `[Real Users]`, `[Active Users]` (green), `[Dormant Users]` (amber),
+`[Never Logged In Users]` (red), and a Card with *Fields* = `FACT_Groups[GroupName]` → **Count**
+(rename its title to "Groups").
+
+**Body visuals:**
+
+1. **Doughnut — login-status split**
+   - *Legend*: `FACT_Users[LoginStatus]`; *Values*: `FACT_Users[UserID]` → **Count**;
+     *Filter*: `IsComponent` is `FALSE`. Colours: Active=green, Dormant=amber, Never=red.
+
+2. **Bar (horizontal) — vault authorizations**
+   - *Y-axis*: `FACT_Users[VaultAuth]`; *X-axis*: `FACT_Users[UserID]` → **Count**;
+     *Filter*: `IsComponent` is `FALSE`.
+
+3. **Pie — groups default vs custom**
+   - *Legend*: `FACT_Groups[IsDefault]`; *Values*: `FACT_Groups[GroupName]` → **Count**.
+
+4. **Table — user detail**
+   - *Columns*: `UserName`, `LoginStatus`, `DaysSinceLogin`, `Source`, `Enabled`,
+     `Suspended` (from `FACT_Users`); *Filter*: `IsComponent` is `FALSE`;
+     sort by `DaysSinceLogin` descending (click the column header).
 
 ---
 
-### Page 8 *(opt-in)*: 🧾 Safe Membership & Admin Audit
+### 🖥️ Page 6 — Vault Connectivity
 
-> [!NOTE]
-> Only populated when the script runs with `$CollectSafeMembers = $true`. Uses
-> `FACT_SafeMembers` and `FACT_AdminAudit`. (The former "Risk & Security Audit"
-> risk-finding visuals were removed with `FACT_RiskFindings`.)
+Only `FACT_VaultConnectivity` feeds this page (CPM / PSM / AIM logon status).
 
-| # | Visual Type | Fields |
-|---|------------|--------|
-| 1 | **Card** | `COUNTROWS(FACT_SafeMembers)` — total member assignments |
-| 2 | **Card** | `[Admin Groups Compliance %]` |
-| 3 | **Card** | `[Admin Groups Missing]` — red if > 0 |
-| 4 | **Stacked Bar** | Axis `FACT_SafeMembers[Region]`, Legend `MemberType` (User/Group), Values count |
-| 5 | **Doughnut** | Legend `FACT_SafeMembers[MemberCategory]`, Values count |
-| 6 | **Table: Admin Group Audit** | `SafeName`, `GroupName`, `GroupExists`, `PermissionLevel`, `MissingPermissions`. Conditional: `GroupExists = No` or `PermissionLevel = Partial` → amber/red |
-| 7 | **Table: Members detail** | `SafeName`, `MemberName`, `MemberType`, `IsSafeManager`, `MemberCategory`, `Permissions`, `MembershipExpirationDate`. Filter `IsDefaultSafe = FALSE` |
+**Slicer:** `FACT_VaultConnectivity[ComponentType]`.
 
-**Slicers**: `DIM_Region[RegionKey]`, `DIM_Safe[Tier]`, `DIM_Safe[SafeType]`, `FACT_SafeMembers[MemberType]`.
+**KPI cards:** `[Vault Components Total]`, `[Vault Components Connected]`,
+`[Vault Connectivity %]` (use `[Connectivity Color]`).
+
+**Body visuals:**
+
+1. **Clustered column — connected vs not, by component type**
+   - *X-axis*: `FACT_VaultConnectivity[ComponentType]`
+   - *Y-axis*: `FACT_VaultConnectivity[InstanceIP]` → **Count**
+   - *Legend*: `FACT_VaultConnectivity[IsLoggedOn]` (TRUE=green, FALSE=red)
+
+2. **Table — connectivity detail**
+   - *Columns*: `ComponentType`, `InstanceIP`, `VaultUserName`, `ComponentVersion`,
+     `IsLoggedOn`, `LastLogonDate`.
+   - Format → **Cell elements** on `IsLoggedOn` → Background color: value `FALSE` → red.
+
+---
+
+### 🔍 Page 7 — CPM Operations & Failures
+
+**Slicers:** `DIM_Platform[PlatformID]`, `DIM_Region[RegionKey]`, `DIM_Safe[Tier]`.
+
+**KPI cards:** `[CPM Failed Count]` (red if >0), `[CPM Success Rate %]`,
+`[APM Accounts]`, and a Card with `FACT_PlatformSummary[PlatformID]` → **Count** (title "Platforms Tracked").
+
+**Body visuals:**
+
+1. **Bar (horizontal) — top failing platforms**
+   - *Y-axis*: `FACT_PlatformSummary[PlatformID]`
+   - *X-axis*: `FACT_PlatformSummary[FailedCount]` → **Sum**
+   - *Filter*: **Top N** 10 by `FailedCount`.
+
+2. **Clustered column — managed vs unmanaged by platform**
+   - *X-axis*: `FACT_PlatformSummary[PlatformID]`
+   - *Y-axis*: add both `FACT_PlatformSummary[ManagedCount]` and
+     `FACT_PlatformSummary[UnmanagedCount]` → **Sum**
+   - *Filter*: **Top N** 10 by `TotalAccounts`.
+
+3. **Stacked column — CPM failures by Region**
+   - *X-axis*: `FACT_CPMFailed[Region]`
+   - *Y-axis*: `FACT_CPMFailed[AccountID]` → **Count**
+   - *Legend*: `FACT_CPMFailed[CPMStatus]`
+
+4. **Doughnut — CPM failures by Tier**
+   - *Legend*: `FACT_CPMFailed[Tier]`; *Values*: `FACT_CPMFailed[AccountID]` → **Count**.
+
+5. **Table — failed-account detail**
+   - *Columns*: `AccountName`, `Address`, `PlatformID`, `SafeName`, `Region`, `Tier`,
+     `CPMStatus`, `ManualReason`, `LastModified`, `LastVerified` (from `FACT_CPMFailed`).
+
+---
+
+### 🧾 Page 8 *(opt-in)* — Safe Membership & Admin Audit
+
+Only has data when the script ran with `$CollectSafeMembers = $true`
+(uses `FACT_SafeMembers` + `FACT_AdminAudit`).
+
+**Slicers:** `DIM_Region[RegionKey]`, `DIM_Safe[Tier]`, `DIM_Safe[SafeType]`,
+`FACT_SafeMembers[MemberType]`.
+
+**KPI cards:** `[Safe Member Assignments]`, `[Admin Groups Compliance %]`,
+`[Admin Groups Missing]` (red if >0).
+
+**Body visuals:**
+
+1. **Stacked column — members by Region, split by type**
+   - *X-axis*: `FACT_SafeMembers[Region]`
+   - *Y-axis*: `FACT_SafeMembers[MemberName]` → **Count**
+   - *Legend*: `FACT_SafeMembers[MemberType]` (User / Group)
+
+2. **Doughnut — member category split**
+   - *Legend*: `FACT_SafeMembers[MemberCategory]`; *Values*: `FACT_SafeMembers[MemberName]` → **Count**.
+
+3. **Table — admin/breakglass group audit**
+   - *Columns*: `SafeName`, `GroupName`, `GroupExists`, `PermissionLevel`,
+     `MissingPermissions` (from `FACT_AdminAudit`).
+   - Format → **Cell elements** on `PermissionLevel`: `Partial` → amber; and on
+     `GroupExists`: `No` → red.
+
+4. **Table — member detail**
+   - *Columns*: `SafeName`, `MemberName`, `MemberType`, `IsSafeManager`,
+     `MemberCategory`, `Permissions`, `MembershipExpirationDate` (from `FACT_SafeMembers`).
+   - *Filter*: `IsDefaultSafe` is `FALSE`.
 
 ---
 
 ## Step 5: Global Slicer Sync
 
-1. **View** → **Sync Slicers**.
-2. Sync `DIM_Region[RegionKey]` across Pages 1, 2, 3, 4, 7, 8.
-3. Sync `DIM_Safe[Tier]` across Pages 1, 2, 3, 4, 7, 8.
-4. Sync `DIM_Safe[SafeType]` across Pages 1, 2, 4, 8.
-5. Sync `DIM_Platform[PlatformID]` across Pages 2 and 7.
+**View → Sync slicers.** Select each slicer and tick the pages it should apply to:
+- `DIM_Region[RegionKey]` → Pages 1, 2, 3, 4, 7, 8
+- `DIM_Safe[Tier]` → Pages 1, 2, 3, 4, 7, 8
+- `DIM_Safe[SafeType]` → Pages 1, 2, 4, 8
+- `DIM_Platform[PlatformID]` → Pages 2, 7
 
 ---
 
 ## Step 6: Page Navigation
 
-Insert → Buttons → Navigator → **Page navigator** (icon-based vertical sidebar, dark background,
-active page in accent `#0EA5E9`):
-- 🏠 Executive Summary
-- 📊 Account Compliance
-- 📈 Onboarding Trend
-- 🔐 Safe Inventory
-- 👥 Users & Groups
-- 🖥️ Vault Connectivity
-- 🔍 CPM Operations
-- 🧾 Safe Membership *(opt-in)*
+**Insert → Buttons → Navigator → Page navigator.** Style it as an icon sidebar
+(dark background, active page in accent `#0EA5E9`):
+🏠 Executive · 📊 Accounts · 📈 Onboarding · 🔐 Safes · 👥 Users · 🖥️ Vault · 🔍 CPM · 🧾 Membership.
 
 ---
 
 ## Step 7: Formatting Checklist
 
-- [ ] Page background: `#0F172A`
-- [ ] Card backgrounds: `#1E293B`, 8px radius
-- [ ] Card titles: 10pt `#94A3B8`; values 24–28pt `#F8FAFC` bold
-- [ ] Chart backgrounds transparent; axis labels `#94A3B8`; data labels `#F8FAFC`
-- [ ] Gridlines `#334155`
-- [ ] Table headers `#1E3A5F` bg, white text; alt rows `#1E293B` / `#0F172A`
-- [ ] Slicers: dropdown, dark bg, white text
-- [ ] Last-refresh card: `MAX(FACT_Accounts[ExtractDate])`
-- [ ] Page title: 16pt bold `#F8FAFC`, top-left
+- [ ] Page background `#0F172A`
+- [ ] Card backgrounds `#1E293B`, 8px rounded
+- [ ] Card titles 10pt `#94A3B8`; values 24–28pt `#F8FAFC` bold
+- [ ] Charts: transparent background; axis labels `#94A3B8`; data labels `#F8FAFC` on; gridlines `#334155`
+- [ ] Tables: header `#1E3A5F`/white; alternating rows `#1E293B` / `#0F172A`
+- [ ] Slicers: dropdown style, dark background, white text
+- [ ] Last-refresh card: new Card, *Fields* = `MAX(FACT_Accounts[ExtractDate])`
+- [ ] Page title text box 16pt bold `#F8FAFC` top-left
 
 ---
 
@@ -523,4 +666,4 @@ active page in accent `#0EA5E9`):
 | 5 - Users | `FACT_Users`, `FACT_Groups` | `FACT_Users` |
 | 6 - Vault Connectivity | `FACT_VaultConnectivity` | `FACT_VaultConnectivity` |
 | 7 - CPM | `FACT_CPMFailed`, `FACT_PlatformSummary` | `DIM_Platform`, `DIM_Region` |
-| 8 - Safe Membership *(opt-in)* | `FACT_SafeMembers`, `FACT_AdminAudit` | `DIM_Region`, `DIM_Safe` |
+| 8 - Membership *(opt-in)* | `FACT_SafeMembers`, `FACT_AdminAudit` | `DIM_Region`, `DIM_Safe` |
